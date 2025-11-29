@@ -1,0 +1,32 @@
+<idea-plugin>
+    <id>com.phil.ultimate.rest.client</id>
+
+    <name>Ultimate REST Client</name>
+
+    <vendor url="https://phil-zhang.netlify.app/" email="bigphil.zhang@qq.com">Phil Zhang</vendor>
+
+    <description><![CDATA[
+    <p>A powerful REST client fully integrated into IntelliJ IDEA, designed to be stronger than Postman.</p>
+    <br/>
+    <h3>Key Features:</h3>
+    <ul>
+        <li><strong>Smart Scanning:</strong> Automatically scan Spring Boot Controllers to generate API requests.</li>
+        <li><strong>Postman Compatible:</strong> Import your existing Postman collections seamlessly.</li>
+        <li><strong>Code Integration:</strong> Navigate directly from request UI to Java code (Controller methods).</li>
+    </ul>
+    ]]></description>
+
+    <depends>com.intellij.modules.platform</depends>
+    <depends>com.intellij.modules.java</depends>
+
+    <extensions defaultExtensionNs="com.intellij">
+        <toolWindow id="UltimateREST"
+                    anchor="right"
+                    factoryClass="com.phil.rest.ui.RestClientToolWindowFactory"
+                    icon="AllIcons.General.Web"
+                    canCloseContents="false"/>
+    </extensions>
+
+    <actions>
+    </actions>
+</idea-plugin>
