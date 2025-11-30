@@ -25,6 +25,7 @@
                     factoryClass="com.phil.rest.ui.RestClientToolWindowFactory"
                     icon="AllIcons.General.Web"
                     canCloseContents="false"/>
+        <projectService serviceImplementation="com.phil.rest.service.CollectionService"/>
     </extensions>
 
     <actions>

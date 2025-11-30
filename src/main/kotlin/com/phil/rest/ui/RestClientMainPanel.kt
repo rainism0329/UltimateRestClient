@@ -3,24 +3,59 @@ package com.phil.rest.ui
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.ui.OnePixelSplitter
+import com.intellij.ui.components.JBTabbedPane
+import com.phil.rest.model.ApiDefinition
+import com.phil.rest.model.CollectionNode
 
-class RestClientMainPanel(project: Project) : SimpleToolWindowPanel(true, true) {
+class RestClientMainPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
+
+    // 将组件提升为属性，方便后续交互
+    private val requestEditor: RequestEditorPanel
+    private val navPanel: NavigationPanel
 
     init {
-        // 1. 创建右侧编辑器
-        val requestEditor = RequestEditorPanel()
-
-        // 2. 创建左侧树，并传入回调：当点击树时，调用 editor.renderApi()
-        val apiTree = ApiTreePanel(project) { selectedApi ->
-            requestEditor.renderApi(selectedApi)
+        // 1. 初始化右侧编辑器
+        // 传入 onSaveSuccess 回调：当用户保存成功后，我们要刷新左侧的 Collections 列表
+        requestEditor = RequestEditorPanel(project) {
+            refreshCollectionsTree()
         }
 
-        // 3. 创建分割面板 (左右布局)
-        val splitter = OnePixelSplitter(false, 0.3f) // false表示水平分割，0.3f是左侧默认宽度比例
-        splitter.firstComponent = apiTree
+        // 2. 初始化左侧导航面板
+        // 实现 onCreateNew 回调
+        navPanel = NavigationPanel(project, { selectedObject ->
+            when (selectedObject) {
+                is ApiDefinition -> requestEditor.renderApi(selectedObject)
+                is CollectionNode -> requestEditor.renderSavedRequest(selectedObject)
+            }
+        }, {
+            // 当点击 "New Request" 时，调用编辑器的清空方法
+            requestEditor.createNewEmptyRequest()
+        })
+
+        // 3. 使用 Splitter 进行左右布局
+        val splitter = OnePixelSplitter(false, 0.3f)
+        splitter.firstComponent = navPanel
         splitter.secondComponent = requestEditor
 
-        // 4. 设置为主内容
         setContent(splitter)
+    }
+
+    /**
+     * 刷新左侧 Collections 树的辅助方法
+     * 这是一个稍微有点"硬"的查找方式，但在 Swing 组件树中很常见
+     */
+    private fun refreshCollectionsTree() {
+        // NavigationPanel 里面是一个 JBTabbedPane
+        val tabbedPane = navPanel.components.find { it is JBTabbedPane } as? JBTabbedPane
+
+        // 假设 CollectionsTreePanel 是第二个 Tab (index 1)
+        // 更好的做法是把 CollectionsTreePanel 公开为 NavigationPanel 的属性，但这里先这样做
+        if (tabbedPane != null && tabbedPane.tabCount > 1) {
+            val collectionTab = tabbedPane.getComponentAt(1) as? CollectionsTreePanel
+            collectionTab?.reloadTree()
+
+            // 可选：保存成功后自动切换到 Collections Tab
+            tabbedPane.selectedIndex = 1
+        }
     }
 }

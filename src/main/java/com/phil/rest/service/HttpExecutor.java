@@ -16,25 +16,32 @@ public class HttpExecutor {
             .connectTimeout(Duration.ofSeconds(10))
             .build();
 
-    public RestResponse execute(String method, String url) {
-        // 确保 URL 包含协议
+    // 修改点：增加 body 参数
+    public RestResponse execute(String method, String url, String body) {
         if (!url.startsWith("http")) {
-            url = "http://" + url; // 默认补全 http (本地调试常用)
+            url = "http://" + url;
         }
 
         long startTime = System.currentTimeMillis();
         try {
             HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(URI.create(url))
+                    .header("Content-Type", "application/json") // 默认发送 JSON
                     .timeout(Duration.ofSeconds(30));
 
-            // 根据 Method 构建请求 (暂时只处理无 Body 的情况，后续再加 POST Body)
+            // 构建 BodyPublisher
+            HttpRequest.BodyPublisher bodyPublisher = (body != null && !body.isBlank())
+                    ? HttpRequest.BodyPublishers.ofString(body)
+                    : HttpRequest.BodyPublishers.noBody();
+
+            // 根据 Method 构建请求
             switch (method.toUpperCase()) {
                 case "GET": builder.GET(); break;
                 case "DELETE": builder.DELETE(); break;
-                case "POST": builder.POST(HttpRequest.BodyPublishers.noBody()); break; // 暂无 Body
-                case "PUT": builder.PUT(HttpRequest.BodyPublishers.noBody()); break;   // 暂无 Body
-                default: builder.method(method, HttpRequest.BodyPublishers.noBody());
+                // POST 和 PUT 使用传入的 body
+                case "POST": builder.POST(bodyPublisher); break;
+                case "PUT": builder.PUT(bodyPublisher); break;
+                default: builder.method(method, bodyPublisher);
             }
 
             HttpResponse<String> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
@@ -48,14 +55,8 @@ public class HttpExecutor {
             );
 
         } catch (Exception e) {
-            // 发生异常时，返回一个错误的响应对象
             long duration = System.currentTimeMillis() - startTime;
-            return new RestResponse(
-                    0,
-                    "Error: " + e.getMessage(),
-                    Map.of(),
-                    duration
-            );
+            return new RestResponse(0, "Error: " + e.getMessage(), Map.of(), duration);
         }
     }
 }
