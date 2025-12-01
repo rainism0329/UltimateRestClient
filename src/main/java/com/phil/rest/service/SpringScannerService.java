@@ -19,11 +19,11 @@ public class SpringScannerService {
         this.project = project;
     }
 
+    // 原有的扫描全项目方法
     public List<ApiDefinition> scanCurrentProject() {
         List<ApiDefinition> apis = new ArrayList<>();
         GlobalSearchScope scope = GlobalSearchScope.projectScope(project);
 
-        // 查找所有 @RestController
         PsiClass restController = JavaPsiFacade.getInstance(project)
                 .findClass("org.springframework.web.bind.annotation.RestController", GlobalSearchScope.allScope(project));
 
@@ -44,13 +44,27 @@ public class SpringScannerService {
         return apis;
     }
 
+    // *** 新增：给 LineMarker 调用的单方法解析 ***
+    public ApiDefinition parseSingleMethod(PsiMethod method) {
+        PsiClass controllerClass = method.getContainingClass();
+        if (controllerClass == null) return null;
+
+        // 检查类上是否有 RestController 或 Controller 注解 (可选，视需求而定)
+        // 这里简单处理：只要方法上有 Mapping 注解就尝试解析
+
+        String baseUrl = extractPathFromAnnotation(controllerClass, "org.springframework.web.bind.annotation.RequestMapping");
+        return parseMethod(method, baseUrl, controllerClass.getName());
+    }
+
+    // 内部复用逻辑
     private ApiDefinition parseMethod(PsiMethod method, String baseUrl, String className) {
         String[][] mappings = {
                 {"org.springframework.web.bind.annotation.GetMapping", "GET"},
                 {"org.springframework.web.bind.annotation.PostMapping", "POST"},
                 {"org.springframework.web.bind.annotation.PutMapping", "PUT"},
                 {"org.springframework.web.bind.annotation.DeleteMapping", "DELETE"},
-                {"org.springframework.web.bind.annotation.RequestMapping", "ALL"}
+                {"org.springframework.web.bind.annotation.RequestMapping", "ALL"},
+                {"org.springframework.web.bind.annotation.PatchMapping", "PATCH"}
         };
 
         for (String[] mapping : mappings) {
@@ -60,52 +74,47 @@ public class SpringScannerService {
                 String fullUrl = combinePaths(baseUrl, methodPath);
 
                 ApiDefinition api = new ApiDefinition(mapping[1], fullUrl, className, method.getName());
-
-                // *** 核心升级：解析参数 ***
-                parseParameters(method, api);
-
+                parseParameters(method, api); // 复用之前的参数解析逻辑
                 return api;
             }
         }
         return null;
     }
 
+    // ... (parseParameters, isSimpleType, extractPathFromAnnotation 等辅助方法保持不变，请保留原有的) ...
+    // 为了节省篇幅，这里假设你保留了之前的 parseParameters 等私有方法。
+    // 如果没有，请把上次给你的代码里对应的 private 方法贴回来。
+
     private void parseParameters(PsiMethod method, ApiDefinition api) {
         PsiParameter[] parameters = method.getParameterList().getParameters();
 
         for (PsiParameter parameter : parameters) {
             String paramName = parameter.getName();
-            String paramType = parameter.getType().getPresentableText(); // e.g. "String", "int", "UserDTO"
+            String paramType = parameter.getType().getPresentableText();
 
-            // 1. 处理 @RequestParam (Query Param)
             PsiAnnotation requestParam = parameter.getAnnotation("org.springframework.web.bind.annotation.RequestParam");
             if (requestParam != null) {
-                String nameFromAnno = extractAttributeValue(requestParam, "value"); // @RequestParam("userId")
+                String nameFromAnno = extractAttributeValue(requestParam, "value");
                 if (nameFromAnno.isEmpty()) nameFromAnno = extractAttributeValue(requestParam, "name");
-
                 String finalName = nameFromAnno.isEmpty() ? paramName : nameFromAnno;
                 api.addParam(new RestParam(finalName, "", RestParam.ParamType.QUERY, paramType));
                 continue;
             }
 
-            // 2. 处理 @PathVariable (Path Param)
             PsiAnnotation pathVar = parameter.getAnnotation("org.springframework.web.bind.annotation.PathVariable");
             if (pathVar != null) {
                 String nameFromAnno = extractAttributeValue(pathVar, "value");
                 String finalName = nameFromAnno.isEmpty() ? paramName : nameFromAnno;
-                api.addParam(new RestParam(finalName, "1", RestParam.ParamType.PATH, paramType)); // 默认给个 "1"
+                api.addParam(new RestParam(finalName, "1", RestParam.ParamType.PATH, paramType));
                 continue;
             }
 
-            // 3. 处理 @RequestBody (Body JSON)
             PsiAnnotation requestBody = parameter.getAnnotation("org.springframework.web.bind.annotation.RequestBody");
             if (requestBody != null) {
-                // 暂时只标记为 BODY，后续我们再做高级的 DTO 转 JSON
                 api.addParam(new RestParam("body", "{}", RestParam.ParamType.BODY, paramType));
                 continue;
             }
 
-            // 4. 默认情况 (没有注解的基本类型通常也是 Query Param)
             if (isSimpleType(paramType)) {
                 api.addParam(new RestParam(paramName, "", RestParam.ParamType.QUERY, paramType));
             }
@@ -117,7 +126,6 @@ public class SpringScannerService {
                 || type.equals("Long") || type.equals("boolean") || type.equals("Boolean");
     }
 
-    // 辅助方法：提取注解属性值
     private String extractAttributeValue(PsiAnnotation annotation, String attribute) {
         PsiAnnotationMemberValue value = annotation.findAttributeValue(attribute);
         if (value != null && !"".equals(value.getText())) {
@@ -126,7 +134,6 @@ public class SpringScannerService {
         return "";
     }
 
-    // 原有的辅助方法...
     private String extractPathFromAnnotation(PsiModifierListOwner owner, String annotationFqn) {
         PsiAnnotation annotation = owner.getAnnotation(annotationFqn);
         return extractValueFromAnnotation(annotation);

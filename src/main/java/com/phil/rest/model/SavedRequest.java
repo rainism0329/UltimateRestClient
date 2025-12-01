@@ -1,19 +1,49 @@
 package com.phil.rest.model;
 
-import java.util.ArrayList;
-import java.util.List;
+import com.intellij.util.xmlb.annotations.Attribute;
+import com.intellij.util.xmlb.annotations.MapAnnotation;
+import com.intellij.util.xmlb.annotations.Tag;
+import com.intellij.util.xmlb.annotations.XCollection;
 
-// 这个类用于持久化保存，类似 Postman 的 Item
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+
+@Tag("request")
 public class SavedRequest {
+    @Attribute("id")
     private String id;
-    private String name; // 显示的名称，比如 "创建用户-测试1"
+
+    @Attribute("name")
+    private String name;
+
+    @Attribute("method")
     private String method;
+
+    @Attribute("url")
     private String url;
-    private String bodyType; // "json", "form-data", etc.
+
+    @Attribute("bodyType")
+    private String bodyType;
+
+    @Tag("bodyContent") // 内容较长，用 Tag 包裹
     private String bodyContent;
 
-    // 我们复用之前定义的 RestParam，但要确保它有无参构造函数以便序列化
+    @Attribute("authType")
+    private String authType = "noauth";
+
+    // Map 序列化配置
+    @Tag("authContent")
+    @MapAnnotation(surroundWithTag = false, entryTagName = "entry", keyAttributeName = "key", valueAttributeName = "value")
+    private Map<String, String> authContent = new HashMap<>();
+
+    @Tag("params")
+    @XCollection(style = XCollection.Style.v2)
     private List<RestParam> params = new ArrayList<>();
+
+    @Tag("headers")
+    @XCollection(style = XCollection.Style.v2)
     private List<RestParam> headers = new ArrayList<>();
 
     public SavedRequest() {}
@@ -24,7 +54,7 @@ public class SavedRequest {
         this.url = url;
     }
 
-    // Getters Setters
+    // Getters & Setters
     public String getName() { return name; }
     public void setName(String name) { this.name = name; }
     public String getMethod() { return method; }
@@ -37,9 +67,11 @@ public class SavedRequest {
     public void setParams(List<RestParam> params) { this.params = params; }
     public List<RestParam> getHeaders() { return headers; }
     public void setHeaders(List<RestParam> headers) { this.headers = headers; }
+    public String getAuthType() { return authType; }
+    public void setAuthType(String authType) { this.authType = authType; }
+    public Map<String, String> getAuthContent() { return authContent; }
+    public void setAuthContent(Map<String, String> authContent) { this.authContent = authContent; }
 
     @Override
-    public String toString() {
-        return name; // 树节点显示的名字
-    }
+    public String toString() { return name; }
 }

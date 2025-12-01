@@ -2,6 +2,8 @@ package com.phil.rest.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.*
+import com.intellij.openapi.fileChooser.FileChooser
+import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.SimpleToolWindowPanel
@@ -10,6 +12,7 @@ import com.intellij.ui.ScrollPaneFactory
 import com.intellij.ui.treeStructure.Tree
 import com.phil.rest.model.CollectionNode
 import com.phil.rest.service.CollectionService
+import com.phil.rest.service.PostmanImportService
 import java.awt.Component
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
@@ -101,11 +104,54 @@ class CollectionsTreePanel(
             override fun actionPerformed(e: AnActionEvent) { onCreateNew() }
         }
 
+        // 4. Import 按钮 (下拉菜单里的)
+        // 实际上你可以把它放在工具栏上，或者像我们之前设计的那样放在一个 Group 里
+        // 这里假设我们放在工具栏上，或者是在一个名为 "Manage" 的 ActionGroup 里
+
+        val importAction = object : AnAction("Import Postman Collection", "Import from JSON file", AllIcons.Actions.Upload) {
+            override fun actionPerformed(e: AnActionEvent) {
+                // 1. 文件选择器
+                val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("json")
+                descriptor.title = "Select Postman Collection JSON"
+                val file = FileChooser.chooseFile(descriptor, project, null) ?: return
+
+                // 2. 调用 Service 解析
+                try {
+                    val importer = PostmanImportService()
+                    // virtualFile -> io.File
+                    val importedNodes = importer.importCollection(java.io.File(file.path))
+
+                    if (importedNodes.isEmpty()) {
+                        Messages.showWarningDialog("No items found in the collection.", "Import Failed")
+                        return
+                    }
+
+                    // 3. 存入 CollectionService
+                    val service = CollectionService.getInstance(project)
+
+                    // 我们可以创建一个新的根文件夹来存放导入的内容，保持整洁
+                    val importRoot = CollectionNode.createFolder(file.nameWithoutExtension)
+                    importRoot.children = importedNodes
+
+                    service.addRootNode(importRoot)
+
+                    // 4. 刷新界面
+                    reloadTree()
+                    Messages.showInfoMessage("Successfully imported ${importedNodes.size} items.", "Import Success")
+
+                } catch (ex: Exception) {
+                    ex.printStackTrace() // 打印堆栈方便调试
+                    Messages.showErrorDialog("Error parsing Postman file: ${ex.message}", "Import Error")
+                }
+            }
+        }
+
         val actionGroup = DefaultActionGroup()
         actionGroup.add(refreshAction)
         actionGroup.add(addFolderAction)
-        actionGroup.addSeparator()
         actionGroup.add(addRequestAction)
+        actionGroup.addSeparator()
+        actionGroup.add(importAction)
 
         val toolbar = actionManager.createActionToolbar("CollectionToolbar", actionGroup, true)
         toolbar.targetComponent = this

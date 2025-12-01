@@ -1,61 +1,70 @@
 package com.phil.rest.ui
 
+import com.intellij.icons.AllIcons
+import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.ui.OnePixelSplitter
-import com.intellij.ui.components.JBTabbedPane
 import com.phil.rest.model.ApiDefinition
 import com.phil.rest.model.CollectionNode
 
 class RestClientMainPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
 
-    // 将组件提升为属性，方便后续交互
     private val requestEditor: RequestEditorPanel
     private val navPanel: NavigationPanel
+    private val splitter: OnePixelSplitter
 
     init {
-        // 1. 初始化右侧编辑器
-        // 传入 onSaveSuccess 回调：当用户保存成功后，我们要刷新左侧的 Collections 列表
-        requestEditor = RequestEditorPanel(project) {
-            refreshCollectionsTree()
-        }
-
-        // 2. 初始化左侧导航面板
-        // 实现 onCreateNew 回调
+        // 1. 初始化组件 (保持不变)
+        requestEditor = RequestEditorPanel(project) { refreshCollectionsTree() }
         navPanel = NavigationPanel(project, { selectedObject ->
             when (selectedObject) {
                 is ApiDefinition -> requestEditor.renderApi(selectedObject)
                 is CollectionNode -> requestEditor.renderSavedRequest(selectedObject)
             }
-        }, {
-            // 当点击 "New Request" 时，调用编辑器的清空方法
-            requestEditor.createNewEmptyRequest()
-        })
+        }, { requestEditor.createNewEmptyRequest() })
 
-        // 3. 使用 Splitter 进行左右布局
-        val splitter = OnePixelSplitter(false, 0.3f)
+        // 2. 初始化 Splitter (默认左右分割)
+        // proportion = 0.2f 让左侧变窄，解决"右侧被挤压"感
+        splitter = OnePixelSplitter(false, 0.2f)
         splitter.firstComponent = navPanel
         splitter.secondComponent = requestEditor
+
+        // 3. 创建顶部工具栏 (用于切换布局)
+        val toolbar = createToolbar()
+        toolbar.targetComponent = this
+        setToolbar(toolbar.component)
 
         setContent(splitter)
     }
 
-    /**
-     * 刷新左侧 Collections 树的辅助方法
-     * 这是一个稍微有点"硬"的查找方式，但在 Swing 组件树中很常见
-     */
-    private fun refreshCollectionsTree() {
-        // NavigationPanel 里面是一个 JBTabbedPane
-        val tabbedPane = navPanel.components.find { it is JBTabbedPane } as? JBTabbedPane
+    private fun createToolbar(): ActionToolbar {
+        val actionGroup = DefaultActionGroup()
 
-        // 假设 CollectionsTreePanel 是第二个 Tab (index 1)
-        // 更好的做法是把 CollectionsTreePanel 公开为 NavigationPanel 的属性，但这里先这样做
-        if (tabbedPane != null && tabbedPane.tabCount > 1) {
-            val collectionTab = tabbedPane.getComponentAt(1) as? CollectionsTreePanel
-            collectionTab?.reloadTree()
+        // 布局切换按钮
+        val toggleLayoutAction = object : AnAction("Switch Layout", "Toggle horizontal/vertical split", AllIcons.Actions.SplitVertically) {
+            override fun actionPerformed(e: AnActionEvent) {
+                // 切换 orientation
+                val isVertical = splitter.orientation
+                splitter.orientation = !isVertical
 
-            // 可选：保存成功后自动切换到 Collections Tab
-            tabbedPane.selectedIndex = 1
+                // 更新图标
+                e.presentation.icon = if (isVertical) AllIcons.Actions.SplitVertically else AllIcons.Actions.SplitHorizontally
+            }
         }
+
+        actionGroup.add(toggleLayoutAction)
+        return ActionManager.getInstance().createActionToolbar("RestClientMainToolbar", actionGroup, true)
+    }
+
+    private fun refreshCollectionsTree() {
+        val tabbedPane = navPanel.components.find { it is javax.swing.JTabbedPane } as? javax.swing.JTabbedPane
+        val collectionTab = tabbedPane?.getComponentAt(1) as? CollectionsTreePanel
+        collectionTab?.reloadTree()
+    }
+
+    // LineMarker 调用入口
+    fun openApiFromCode(api: ApiDefinition) {
+        requestEditor.renderApi(api)
     }
 }
