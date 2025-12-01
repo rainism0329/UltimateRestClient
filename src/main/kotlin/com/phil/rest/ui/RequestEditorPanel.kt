@@ -1,61 +1,67 @@
 package com.phil.rest.ui
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
 import com.intellij.icons.AllIcons
 import com.intellij.json.JsonLanguage
-import com.intellij.openapi.actionSystem.AnAction
+import com.intellij.openapi.actionSystem.ActionManager
+import com.intellij.openapi.actionSystem.ActionToolbar
 import com.intellij.openapi.actionSystem.AnActionEvent
+import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.fileChooser.FileChooserFactory
+import com.intellij.openapi.fileChooser.FileSaverDescriptor
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
+import com.intellij.openapi.ui.MessageType
+import com.intellij.openapi.ui.SimpleToolWindowPanel
+import com.intellij.openapi.ui.popup.Balloon
+import com.intellij.openapi.ui.popup.JBPopupFactory
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.LanguageTextField
 import com.intellij.ui.ToolbarDecorator
-import com.intellij.ui.components.JBScrollPane
+import com.intellij.ui.awt.RelativePoint
+import com.intellij.ui.components.JBLabel
 import com.intellij.ui.components.JBTabbedPane
-import com.intellij.ui.components.JBTextArea
 import com.intellij.ui.dsl.builder.AlignX
-import com.intellij.ui.dsl.builder.RightGap
-import com.intellij.ui.dsl.builder.actionButton
 import com.intellij.ui.dsl.builder.panel
 import com.intellij.ui.table.JBTable
-import com.phil.rest.model.ApiDefinition
-import com.phil.rest.model.CollectionNode
-import com.phil.rest.model.RestEnv
-import com.phil.rest.model.RestParam
-import com.phil.rest.model.SavedRequest
+import com.intellij.util.ui.JBUI
+import com.phil.rest.model.*
 import com.phil.rest.service.CollectionService
 import com.phil.rest.service.EnvService
 import com.phil.rest.service.HeaderStore
 import com.phil.rest.service.HttpExecutor
+import com.phil.rest.ui.action.EnvironmentComboAction
+import com.phil.rest.ui.component.GeekAddressBar
 import java.awt.BorderLayout
 import java.awt.CardLayout
-import java.util.Base64
+import java.awt.Color
+import java.awt.FlowLayout
+import java.awt.datatransfer.StringSelection
+import java.util.*
 import javax.swing.*
 import javax.swing.table.DefaultTableModel
 
 class RequestEditorPanel(
     private val project: Project,
     private val onSaveSuccess: () -> Unit
-) : JPanel(BorderLayout()) {
+) : SimpleToolWindowPanel(true, true) {
 
     private var activeCollectionNode: CollectionNode? = null
 
-    // --- 顶部组件 ---
-    private val envComboBox = ComboBox<RestEnv>()
-    // 注意：管理、保存等按钮现在变成了 Action，不再是简单的 JButton 成员变量
-    // 我们只需持有 Send 按钮的引用用于控制状态
-    private val methodComboBox = ComboBox(arrayOf("GET", "POST", "PUT", "DELETE", "PATCH"))
-    private val urlField = JTextField()
-    private val sendButton = JButton("Send", AllIcons.Actions.Execute) // 加个图标更显眼
+    // --- 核心组件 ---
+    private val addressBar = GeekAddressBar(project) { sendRequest() }
 
     // --- Tabs ---
     private val tabbedPane = JBTabbedPane()
+
+    // Params
     private val paramsTableModel = DefaultTableModel(arrayOf("Key", "Value"), 0)
     private val paramsTable = JBTable(paramsTableModel)
-
-    private val headersTableModel = DefaultTableModel(arrayOf("Key", "Value"), 0)
-    private val headersTable = JBTable(headersTableModel)
 
     // Auth
     private val authTypeCombo = ComboBox(arrayOf("No Auth", "Bearer Token", "Basic Auth"))
@@ -63,27 +69,35 @@ class RequestEditorPanel(
     private val basicUserField = JTextField()
     private val basicPasswordField = JPasswordField()
 
-    // Body (JSON 高亮)
+    // Headers
+    private val headersTableModel = DefaultTableModel(arrayOf("Key", "Value"), 0)
+    private val headersTable = JBTable(headersTableModel)
+
+    // Body & Response
     private val bodyTypeCombo = ComboBox(arrayOf("none", "raw (json)"))
     private val bodyEditor = LanguageTextField(JsonLanguage.INSTANCE, project, "", false)
+    private val responseEditor = LanguageTextField(JsonLanguage.INSTANCE, project, "", true).apply { isViewer = true }
 
-    // Response (JSON 高亮只读)
-    private val responseEditor = LanguageTextField(JsonLanguage.INSTANCE, project, "", true).apply {
-        isViewer = true
+    // 状态栏
+    private val statusLabel = JBLabel(" Ready", AllIcons.General.Balloon, SwingConstants.LEFT).apply {
+        foreground = JBUI.CurrentTheme.ContextHelp.FOREGROUND
     }
-    private val responseStatusLabel = JLabel("Ready")
+    private val timeLabel = JBLabel()
+
+    private val objectMapper = ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT)
 
     init {
-        // 0. 初始化数据
-        refreshEnvComboBox()
-        envComboBox.addActionListener {
-            EnvService.getInstance(project).selectedEnv = envComboBox.selectedItem as? RestEnv
-        }
+        refreshEnvComboBox() // 虽然里面其实没逻辑了，但保留结构
 
-        // 1. 构建全新的双层顶部面板
-        val topPanel = buildCoolTopPanel()
+        val toolbar = createTopToolbar()
+        toolbar.targetComponent = this
+        setToolbar(toolbar.component)
 
-        // 2. 构建 Tab 内容
+        val mainContent = JPanel(BorderLayout())
+        val addressWrapper = JPanel(BorderLayout())
+        addressWrapper.border = JBUI.Borders.empty(10, 10, 5, 10)
+        addressWrapper.add(addressBar, BorderLayout.CENTER)
+
         val paramsPanel = createTablePanel(paramsTable, paramsTableModel)
         setupHeaderAutoCompletion()
         val headersPanel = createTablePanel(headersTable, headersTableModel)
@@ -91,80 +105,93 @@ class RequestEditorPanel(
         val bodyPanel = createBodyPanel()
         val responsePanel = createResponsePanel()
 
-        // 3. 组装
         tabbedPane.addTab("Params", paramsPanel)
         tabbedPane.addTab("Auth", authPanel)
         tabbedPane.addTab("Headers", headersPanel)
         tabbedPane.addTab("Body", bodyPanel)
         tabbedPane.addTab("Response", responsePanel)
 
-        add(topPanel, BorderLayout.NORTH)
-        add(tabbedPane, BorderLayout.CENTER)
+        val statusBar = JPanel(BorderLayout())
+        statusBar.border = JBUI.Borders.empty(2, 5)
+        statusBar.background = JBUI.CurrentTheme.StatusBar.Widget.HOVER_BACKGROUND
+        statusBar.add(statusLabel, BorderLayout.WEST)
+        statusBar.add(timeLabel, BorderLayout.EAST)
 
-        // 4. 事件绑定
-        sendButton.addActionListener { sendRequest() }
+        mainContent.add(addressWrapper, BorderLayout.NORTH)
+        mainContent.add(tabbedPane, BorderLayout.CENTER)
+        mainContent.add(statusBar, BorderLayout.SOUTH)
+
+        setContent(mainContent)
     }
 
-    // --- ✨ 核心整容代码：构建酷炫的顶部面板 ---
-    private fun buildCoolTopPanel(): JComponent {
-        return panel {
-            // 第一行：环境 + 工具栏 (Meta Row)
-            row {
-                // 左侧：环境选择
-                label("Env:")
-                cell(envComboBox).gap(RightGap.SMALL)
+    // ... createTopToolbar, createResponsePanel, createBodyPanel, createAuthPanel ...
+    // ... createTablePanel, setupHeaderAutoCompletion, setEditorText, resolveVariables, refreshEnvComboBox ...
+    // 为了节省篇幅，请确保保留这些辅助方法 (与上一版一致)
 
-                // ⚙️ 管理环境 (图标按钮)
-                actionButton(object : DumbAwareAction("Manage Environments", "Add or edit environments", AllIcons.General.Settings) {
-                    override fun actionPerformed(e: AnActionEvent) {
-                        if (EnvManagerDialog(project).showAndGet()) refreshEnvComboBox()
-                    }
-                })
+    // ------------------------------------------------------------------------
+    // 仅贴出需要修改逻辑的方法：sendRequest
+    // ------------------------------------------------------------------------
 
-                // 中间：弹簧占位符，把后面的按钮顶到最右边
-                panel { }.resizableColumn().align(AlignX.FILL)
-
-                // 右侧：保存操作 (图标按钮)
-                // 💾 保存
-                actionButton(object : DumbAwareAction("Save", "Save current request", AllIcons.Actions.MenuSaveall) {
-                    override fun actionPerformed(e: AnActionEvent) {
-                        if (activeCollectionNode != null) updateExistingRequest() else createNewRequestFlow()
-                    }
-                })
-
-                // 📝 另存为
-                actionButton(object : DumbAwareAction("Save As...", "Save as new request", AllIcons.Actions.MenuPaste) {
-                    override fun actionPerformed(e: AnActionEvent) {
-                        createNewRequestFlow()
-                    }
-                })
-
-                // 🧹 清空 (新建)
-                actionButton(object : DumbAwareAction("New/Clear", "Create empty request", AllIcons.Actions.GC) {
-                    override fun actionPerformed(e: AnActionEvent) {
-                        createNewEmptyRequest()
-                    }
-                })
+    private fun createTopToolbar(): ActionToolbar {
+        val actionGroup = DefaultActionGroup()
+        actionGroup.add(EnvironmentComboAction(project) {})
+        actionGroup.addSeparator()
+        actionGroup.add(object : DumbAwareAction("Save", "Save current request", AllIcons.Actions.MenuSaveall) {
+            override fun actionPerformed(e: AnActionEvent) {
+                if (activeCollectionNode != null) updateExistingRequest() else createNewRequestFlow()
             }
-
-            // 第二行：核心请求栏 (Action Row)
-            // 这里不需要 label，直接像浏览器地址栏一样紧凑
-            row {
-                cell(methodComboBox).gap(RightGap.SMALL)
-                cell(urlField).align(AlignX.FILL).gap(RightGap.SMALL)
-                cell(sendButton)
-            }
-        }
+        })
+        actionGroup.add(object : DumbAwareAction("Save As...", "Save as new request", AllIcons.Actions.MenuPaste) {
+            override fun actionPerformed(e: AnActionEvent) { createNewRequestFlow() }
+        })
+        actionGroup.addSeparator()
+        actionGroup.add(object : DumbAwareAction("New Request", "Clear and create new", AllIcons.General.Add) {
+            override fun actionPerformed(e: AnActionEvent) { createNewEmptyRequest() }
+        })
+        return ActionManager.getInstance().createActionToolbar("RestClientTopToolbar", actionGroup, true)
     }
 
-    // --- 其他辅助面板构建 ---
+    // ... (其他构建方法略，请从上一条回复复制) ...
+
+    private fun createResponsePanel(): JPanel {
+        val panel = JPanel(BorderLayout())
+        val actionGroup = DefaultActionGroup()
+        actionGroup.add(object : DumbAwareAction("Copy", "Copy response body", AllIcons.Actions.Copy) {
+            override fun actionPerformed(e: AnActionEvent) {
+                val text = responseEditor.text
+                if (text.isNotEmpty()) {
+                    CopyPasteManager.getInstance().setContents(StringSelection(text))
+                    JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("Copied!", MessageType.INFO, null).setFadeoutTime(1500).createBalloon().show(RelativePoint.getSouthEastOf(statusLabel), Balloon.Position.atRight)
+                }
+            }
+        })
+        actionGroup.add(object : DumbAwareAction("Export", "Export to file", AllIcons.Actions.MenuSaveall) {
+            override fun actionPerformed(e: AnActionEvent) {
+                val descriptor = FileSaverDescriptor("Export Response", "Save response body", "json", "txt")
+                val dialog = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)
+                val wrapper = dialog.save(null as VirtualFile?, "response.json")
+                if (wrapper != null) {
+                    try { wrapper.file.writeText(responseEditor.text); statusLabel.text = " Saved to ${wrapper.file.name}" }
+                    catch (ex: Exception) { statusLabel.text = " Export failed: ${ex.message}"; statusLabel.icon = AllIcons.General.Error }
+                }
+            }
+        })
+        val toolbar = ActionManager.getInstance().createActionToolbar("ResponseToolbar", actionGroup, true)
+        toolbar.targetComponent = responseEditor
+        val toolBarPanel = JPanel(BorderLayout())
+        toolBarPanel.border = JBUI.Borders.emptyBottom(2)
+        toolBarPanel.add(JLabel("Body:"), BorderLayout.WEST)
+        toolBarPanel.add(toolbar.component, BorderLayout.EAST)
+        panel.add(toolBarPanel, BorderLayout.NORTH)
+        panel.add(responseEditor, BorderLayout.CENTER)
+        return panel
+    }
 
     private fun createBodyPanel(): JPanel {
         val panel = JPanel(BorderLayout())
-        val top = JPanel(BorderLayout())
-        top.add(JLabel(" Content-Type: "), BorderLayout.WEST)
-        top.add(bodyTypeCombo, BorderLayout.CENTER)
-
+        val top = JPanel(FlowLayout(FlowLayout.LEFT))
+        top.add(JLabel("Content-Type:"))
+        top.add(bodyTypeCombo)
         bodyTypeCombo.addActionListener {
             val type = bodyTypeCombo.selectedItem as String
             bodyEditor.isEnabled = type != "none"
@@ -175,54 +202,26 @@ class RequestEditorPanel(
         return panel
     }
 
-    private fun createResponsePanel(): JPanel {
-        val panel = JPanel(BorderLayout())
-        // 美化状态栏，加点 padding
-        responseStatusLabel.border = BorderFactory.createEmptyBorder(5, 5, 5, 5)
-        responseStatusLabel.icon = AllIcons.RunConfigurations.TestState.Run // 默认图标
-        panel.add(responseStatusLabel, BorderLayout.NORTH)
-        panel.add(responseEditor, BorderLayout.CENTER)
-        return panel
-    }
-
     private fun createAuthPanel(): JPanel {
         val cardPanel = JPanel(CardLayout())
         val noAuth = JPanel()
-
-        val bearer = panel {
-            row("Token:") { cell(bearerTokenField).align(AlignX.FILL) }
-        }
-        val basic = panel {
-            row("Username:") { cell(basicUserField).align(AlignX.FILL) }
-            row("Password:") { cell(basicPasswordField).align(AlignX.FILL) }
-        }
-
+        val bearer = panel { row("Token:") { cell(bearerTokenField).align(AlignX.FILL) } }
+        val basic = panel { row("Username:") { cell(basicUserField).align(AlignX.FILL) }; row("Password:") { cell(basicPasswordField).align(AlignX.FILL) } }
         cardPanel.add(noAuth, "No Auth")
         cardPanel.add(bearer, "Bearer Token")
         cardPanel.add(basic, "Basic Auth")
-
         val main = JPanel(BorderLayout())
-        main.add(panel {
-            row("Auth Type:") { cell(authTypeCombo) }
-        }, BorderLayout.NORTH)
+        main.add(panel { row("Auth Type:") { cell(authTypeCombo) } }, BorderLayout.NORTH)
         main.add(cardPanel, BorderLayout.CENTER)
-
-        authTypeCombo.addActionListener {
-            (cardPanel.layout as CardLayout).show(cardPanel, authTypeCombo.selectedItem as String)
-        }
+        authTypeCombo.addActionListener { (cardPanel.layout as CardLayout).show(cardPanel, authTypeCombo.selectedItem as String) }
         return main
     }
 
     private fun createTablePanel(table: JBTable, model: DefaultTableModel): JPanel {
         val decorator = ToolbarDecorator.createDecorator(table)
             .setAddAction { model.addRow(arrayOf("", "")) }
-            .setRemoveAction {
-                if (table.isEditing) table.cellEditor?.stopCellEditing()
-                if (table.selectedRow >= 0) model.removeRow(table.selectedRow)
-            }
-        val panel = JPanel(BorderLayout())
-        panel.add(decorator.createPanel(), BorderLayout.CENTER)
-        return panel
+            .setRemoveAction { if (table.isEditing) table.cellEditor?.stopCellEditing(); if (table.selectedRow >= 0) model.removeRow(table.selectedRow) }
+        return decorator.createPanel()
     }
 
     private fun setupHeaderAutoCompletion() {
@@ -232,85 +231,64 @@ class RequestEditorPanel(
         headersTable.columnModel.getColumn(0).cellEditor = headerKeyEditor
     }
 
-    // 安全更新编辑器
     private fun setEditorText(editor: LanguageTextField, text: String) {
-        ApplicationManager.getApplication().invokeLater {
-            if (!project.isDisposed) {
-                WriteCommandAction.runWriteCommandAction(project) {
-                    editor.text = text
-                }
-            }
-        }
-    }
-
-    private fun refreshEnvComboBox() {
-        val service = EnvService.getInstance(project)
-        val listeners = envComboBox.actionListeners
-        listeners.forEach { envComboBox.removeActionListener(it) }
-        envComboBox.removeAllItems()
-        envComboBox.addItem(null)
-        service.envs.forEach { envComboBox.addItem(it) }
-        envComboBox.selectedItem = service.selectedEnv
-        listeners.forEach { envComboBox.addActionListener(it) }
+        ApplicationManager.getApplication().invokeLater { if (!project.isDisposed) WriteCommandAction.runWriteCommandAction(project) { editor.text = text } }
     }
 
     private fun resolveVariables(text: String?): String {
         if (text.isNullOrEmpty()) return ""
-        val selectedEnv = envComboBox.selectedItem as? RestEnv ?: return text
+        val selectedEnv = EnvService.getInstance(project).selectedEnv ?: return text
         var result = text
-        for ((key, value) in selectedEnv.variables) {
-            result = result?.replace("{{$key}}", value)
-        }
+        for ((key, value) in selectedEnv.variables) { result = result?.replace("{{$key}}", value) }
         return result ?: ""
     }
 
-    // --- 逻辑部分 (保持不变) ---
-    // ... sendRequest, collectData, createNewEmptyRequest, renderApi, renderSavedRequest, updateExistingRequest, createNewRequestFlow ...
-    // 为节省篇幅，请直接保留上一版的所有这些业务逻辑代码，它们完全通用。
-    // 只需要把 sendRequest 里的 responseStatusLabel.icon 更新一下即可
+    private fun refreshEnvComboBox() { } // 空实现
 
-    // -------------------------------------------------------------------------
-    // 下面是需要保留的业务方法，你可以直接从之前的代码块复制进来，
-    // 唯一的区别是 sendRequest 里我加了一行 icon 更新
-    // -------------------------------------------------------------------------
+    private fun getUniqueName(folder: CollectionNode, baseName: String): String {
+        var uniqueName = baseName
+        var counter = 1
+        val existingNames = folder.children.map { it.name }.toSet()
+        while (existingNames.contains(uniqueName)) { uniqueName = "$baseName ($counter)"; counter++ }
+        return uniqueName
+    }
+
+    private fun formatJson(json: String): String {
+        if (json.isBlank()) return ""
+        return try { objectMapper.writeValueAsString(objectMapper.readTree(json)) } catch (e: Exception) { json }
+    }
 
     fun createNewEmptyRequest() {
         activeCollectionNode = null
-        methodComboBox.selectedItem = "GET"
-        urlField.text = ""
+        addressBar.method = "GET"
+        addressBar.url = ""
         paramsTableModel.rowCount = 0; paramsTableModel.addRow(arrayOf("", ""))
         headersTableModel.rowCount = 0; headersTableModel.addRow(arrayOf("", ""))
         bodyTypeCombo.selectedItem = "none"
         setEditorText(bodyEditor, "")
-
-        // Reset Auth
         authTypeCombo.selectedItem = "No Auth"
         bearerTokenField.text = ""
         basicUserField.text = ""
         basicPasswordField.text = ""
-
         setEditorText(responseEditor, "")
-        responseStatusLabel.text = "New Request"
-        responseStatusLabel.icon = AllIcons.General.Information
+        statusLabel.text = " New Request"
+        statusLabel.icon = AllIcons.General.Add
+        timeLabel.text = ""
         tabbedPane.selectedIndex = 0
     }
 
     fun renderApi(api: ApiDefinition) {
         activeCollectionNode = null
-        methodComboBox.selectedItem = api.method.uppercase()
-        var fullUrl = "http://localhost:8080" + api.url
-
+        addressBar.method = api.method.uppercase()
+        addressBar.url = "http://localhost:8080" + api.url
         paramsTableModel.rowCount = 0
         headersTableModel.rowCount = 0
         setEditorText(bodyEditor, "")
         bodyTypeCombo.selectedItem = "none"
-
         authTypeCombo.selectedItem = "No Auth"
-        bearerTokenField.text = ""
-
         for (param in api.params) {
             when (param.type) {
-                RestParam.ParamType.PATH -> fullUrl = fullUrl.replace("{${param.name}}", param.value)
+                RestParam.ParamType.PATH -> addressBar.url = addressBar.url.replace("{${param.name}}", param.value)
                 RestParam.ParamType.QUERY -> paramsTableModel.addRow(arrayOf(param.name, param.value))
                 RestParam.ParamType.HEADER -> headersTableModel.addRow(arrayOf(param.name, param.value))
                 RestParam.ParamType.BODY -> {
@@ -320,45 +298,37 @@ class RequestEditorPanel(
                 }
             }
         }
-        urlField.text = fullUrl
+        statusLabel.text = " Unsaved API"
+        statusLabel.icon = AllIcons.FileTypes.Java
     }
 
     fun renderSavedRequest(node: CollectionNode) {
         activeCollectionNode = node
         val req = node.request ?: return
-        methodComboBox.selectedItem = req.method.uppercase()
-        urlField.text = req.url
-
+        addressBar.method = req.method.uppercase()
+        addressBar.url = req.url
         paramsTableModel.rowCount = 0
         req.params.forEach { paramsTableModel.addRow(arrayOf(it.name, it.value)) }
         headersTableModel.rowCount = 0
         req.headers.forEach { headersTableModel.addRow(arrayOf(it.name, it.value)) }
-
         val content = req.bodyContent ?: ""
         setEditorText(bodyEditor, content)
         bodyTypeCombo.selectedItem = if (content.isEmpty()) "none" else "raw (json)"
-
-        val typeStr = when (req.authType) {
-            "bearer" -> "Bearer Token"
-            "basic" -> "Basic Auth"
-            else -> "No Auth"
-        }
+        val typeStr = when (req.authType) { "bearer" -> "Bearer Token"; "basic" -> "Basic Auth"; else -> "No Auth" }
         authTypeCombo.selectedItem = typeStr
         bearerTokenField.text = req.authContent["token"] ?: ""
         basicUserField.text = req.authContent["username"] ?: ""
         basicPasswordField.text = req.authContent["password"] ?: ""
-
         tabbedPane.selectedIndex = 0
         setEditorText(responseEditor, "")
-        responseStatusLabel.text = "Editing: ${node.name}"
-        responseStatusLabel.icon = AllIcons.Actions.Edit
+        statusLabel.text = " Editing: ${node.name}"
+        statusLabel.icon = AllIcons.Actions.Edit
     }
 
     private fun collectData(targetReq: SavedRequest) {
-        targetReq.method = methodComboBox.selectedItem as String
-        targetReq.url = urlField.text
+        targetReq.method = addressBar.method
+        targetReq.url = addressBar.url
         targetReq.bodyContent = if (bodyTypeCombo.selectedItem == "none") null else bodyEditor.text
-
         val params = ArrayList<RestParam>()
         for (i in 0 until paramsTableModel.rowCount) {
             val k = paramsTableModel.getValueAt(i, 0) as String
@@ -366,7 +336,6 @@ class RequestEditorPanel(
             if (k.isNotBlank()) params.add(RestParam(k, v, RestParam.ParamType.QUERY, "String"))
         }
         targetReq.params = params
-
         val headers = ArrayList<RestParam>()
         for (i in 0 until headersTableModel.rowCount) {
             val k = headersTableModel.getValueAt(i, 0) as String
@@ -374,19 +343,11 @@ class RequestEditorPanel(
             if (k.isNotBlank()) headers.add(RestParam(k, v, RestParam.ParamType.HEADER, "String"))
         }
         targetReq.headers = headers
-
         val authType = authTypeCombo.selectedItem as String
-        targetReq.authType = when (authType) {
-            "Bearer Token" -> "bearer"
-            "Basic Auth" -> "basic"
-            else -> "noauth"
-        }
+        targetReq.authType = when (authType) { "Bearer Token" -> "bearer"; "Basic Auth" -> "basic"; else -> "noauth" }
         val authMap = HashMap<String, String>()
         if (targetReq.authType == "bearer") authMap["token"] = bearerTokenField.text
-        if (targetReq.authType == "basic") {
-            authMap["username"] = basicUserField.text
-            authMap["password"] = String(basicPasswordField.password)
-        }
+        if (targetReq.authType == "basic") { authMap["username"] = basicUserField.text; authMap["password"] = String(basicPasswordField.password) }
         targetReq.authContent = authMap
     }
 
@@ -396,6 +357,8 @@ class RequestEditorPanel(
         collectData(req)
         node.request = req
         onSaveSuccess()
+        statusLabel.text = " Saved: ${node.name}"
+        statusLabel.icon = AllIcons.Actions.MenuSaveall
     }
 
     private fun createNewRequestFlow() {
@@ -405,10 +368,14 @@ class RequestEditorPanel(
             savedRequest.name = dialog.requestName
             collectData(savedRequest)
             val targetFolder = dialog.selectedFolder ?: CollectionService.getInstance(project).getOrCreateDefaultRoot()
-            val newNode = CollectionNode.createRequest(savedRequest.name, savedRequest)
+            val uniqueName = getUniqueName(targetFolder, savedRequest.name)
+            savedRequest.name = uniqueName
+            val newNode = CollectionNode.createRequest(uniqueName, savedRequest)
             targetFolder.addChild(newNode)
             activeCollectionNode = newNode
             onSaveSuccess()
+            statusLabel.text = " Saved: $uniqueName"
+            statusLabel.icon = AllIcons.Actions.MenuSaveall
         }
     }
 
@@ -416,8 +383,8 @@ class RequestEditorPanel(
         if (headersTable.isEditing) headersTable.cellEditor.stopCellEditing()
         if (paramsTable.isEditing) paramsTable.cellEditor.stopCellEditing()
 
-        var finalUrl = resolveVariables(urlField.text)
-        val method = methodComboBox.selectedItem as String
+        var finalUrl = resolveVariables(addressBar.url)
+        val method = addressBar.method
         val finalBody = resolveVariables(if (bodyTypeCombo.selectedItem == "none") null else bodyEditor.text)
 
         val queryParams = StringBuilder()
@@ -429,11 +396,8 @@ class RequestEditorPanel(
                 queryParams.append("$key=$valResolved")
             }
         }
-        if (!finalUrl.contains("?") && queryParams.isNotEmpty()) {
-            finalUrl += queryParams.toString()
-        } else if (finalUrl.contains("?") && queryParams.isNotEmpty()) {
-            finalUrl += "&" + queryParams.substring(1)
-        }
+        if (!finalUrl.contains("?") && queryParams.isNotEmpty()) finalUrl += queryParams.toString()
+        else if (finalUrl.contains("?") && queryParams.isNotEmpty()) finalUrl += "&" + queryParams.substring(1)
 
         val headers = ArrayList<RestParam>()
         val headerStore = HeaderStore.getInstance(project)
@@ -459,9 +423,11 @@ class RequestEditorPanel(
             }
         }
 
-        sendButton.isEnabled = false
-        responseStatusLabel.text = "Sending..."
-        responseStatusLabel.icon = AllIcons.Process.Step_1 // 加载中图标
+        // [修复] 使用 addressBar.isBusy 控制状态
+        addressBar.isBusy = true
+        statusLabel.text = " Sending..."
+        statusLabel.icon = AllIcons.Process.Step_1
+        timeLabel.text = ""
         setEditorText(responseEditor, "")
         tabbedPane.selectedIndex = 4
 
@@ -470,18 +436,20 @@ class RequestEditorPanel(
             val response = executor.execute(method, finalUrl, finalBody, headers)
 
             SwingUtilities.invokeLater {
-                sendButton.isEnabled = true
-                val responseText = if (response.statusCode != 0) response.body else response.body
+                // [修复] 恢复状态
+                addressBar.isBusy = false
 
-                responseStatusLabel.text = "Status: ${response.statusCode}  Time: ${response.durationMs}ms"
-                // 根据状态码显示不同图标
+                val prettyBody = formatJson(response.body)
+                statusLabel.text = " Status: ${response.statusCode} ${if(response.statusCode==200) "OK" else ""}"
+                timeLabel.text = "Time: ${response.durationMs}ms  "
                 if (response.statusCode in 200..299) {
-                    responseStatusLabel.icon = AllIcons.RunConfigurations.TestState.Green2
+                    statusLabel.icon = AllIcons.RunConfigurations.TestState.Green2
+                    statusLabel.foreground = Color(54, 150, 70)
                 } else {
-                    responseStatusLabel.icon = AllIcons.RunConfigurations.TestState.Red2
+                    statusLabel.icon = AllIcons.RunConfigurations.TestState.Red2
+                    statusLabel.foreground = Color(200, 50, 50)
                 }
-
-                setEditorText(responseEditor, responseText)
+                setEditorText(responseEditor, prettyBody)
             }
         }
     }
