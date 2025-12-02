@@ -19,11 +19,7 @@ import com.intellij.ui.JBSplitter
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.util.ui.JBUI
 import com.phil.rest.model.*
-import com.phil.rest.service.CollectionService
-import com.phil.rest.service.CurlConverter
-import com.phil.rest.service.EnvService
-import com.phil.rest.service.HeaderStore
-import com.phil.rest.service.HttpExecutor
+import com.phil.rest.service.*
 import com.phil.rest.ui.action.EnvironmentComboAction
 import com.phil.rest.ui.component.GeekAddressBar
 import java.awt.BorderLayout
@@ -40,24 +36,18 @@ class RequestEditorPanel(
     private var activeCollectionNode: CollectionNode? = null
     private val objectMapper = ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT)
 
-    private val addressBar = GeekAddressBar(project, { sendRequest() }, { curlText ->
-        importCurl(curlText)
-    })
-
+    private val addressBar = GeekAddressBar(project, { sendRequest() }, { curlText -> importCurl(curlText) })
     private val inputPanel = RequestInputPanel(project)
     private val responsePanel = ResponsePanel(project)
 
     init {
         Disposer.register(this, responsePanel)
 
-        // 1. Toolbar
         val toolbar = createTopToolbar()
         toolbar.targetComponent = this
         setToolbar(toolbar.component)
 
-        // 2. Layout
         val mainContent = JPanel(BorderLayout())
-
         val addressWrapper = JPanel(BorderLayout())
         addressWrapper.border = JBUI.Borders.empty(10, 10, 5, 10)
         addressWrapper.add(addressBar, BorderLayout.CENTER)
@@ -84,7 +74,6 @@ class RequestEditorPanel(
         val actionGroup = DefaultActionGroup()
         actionGroup.add(EnvironmentComboAction(project) {})
 
-        // [新增] Clear Cookies 按钮
         actionGroup.add(object : DumbAwareAction("Clear Cookies", "Clear all session cookies", AllIcons.Actions.GC) {
             override fun actionPerformed(e: AnActionEvent) {
                 HttpExecutor.clearCookies()
@@ -96,30 +85,17 @@ class RequestEditorPanel(
 
         actionGroup.addSeparator()
 
-        // Import cURL
         actionGroup.add(object : DumbAwareAction("Import cURL", "Paste cURL command to import", AllIcons.Actions.Upload) {
             override fun actionPerformed(e: AnActionEvent) {
-                val curlText = Messages.showMultilineInputDialog(
-                    project,
-                    "Paste your cURL command here:",
-                    "Import cURL",
-                    null,
-                    Messages.getQuestionIcon(),
-                    null
-                )
+                val curlText = Messages.showMultilineInputDialog(project, "Paste your cURL command here:", "Import cURL", null, Messages.getQuestionIcon(), null)
                 if (!curlText.isNullOrBlank()) {
-                    if (!importCurl(curlText)) {
-                        Messages.showErrorDialog("Invalid cURL command format.", "Import Failed")
-                    }
+                    if (!importCurl(curlText)) Messages.showErrorDialog("Invalid cURL command format.", "Import Failed")
                 }
             }
         })
 
-        // Copy as cURL
         actionGroup.add(object : DumbAwareAction("Copy as cURL", "Copy request as cURL command", AllIcons.Actions.Copy) {
-            override fun actionPerformed(e: AnActionEvent) {
-                copyAsCurl()
-            }
+            override fun actionPerformed(e: AnActionEvent) { copyAsCurl() }
         })
 
         actionGroup.addSeparator()
@@ -145,14 +121,10 @@ class RequestEditorPanel(
         return ActionManager.getInstance().createActionToolbar("RestClientTopToolbar", actionGroup, true)
     }
 
-    // --- cURL 逻辑 ---
-
     private fun importCurl(curlText: String): Boolean {
         val curlReq = CurlConverter.parseCurl(curlText) ?: return false
-
         addressBar.method = curlReq.method
         addressBar.url = curlReq.url
-
         var bodyType = "raw (json)"
         if (curlReq.contentType != null) {
             if (curlReq.contentType.contains("xml")) bodyType = "raw (xml)"
@@ -160,19 +132,9 @@ class RequestEditorPanel(
             else if (curlReq.contentType.contains("form-urlencoded")) bodyType = "x-www-form-urlencoded"
         }
         inputPanel.setBodyType(bodyType)
-
-        inputPanel.loadRequestData(
-            emptyList(),
-            curlReq.headers,
-            curlReq.body,
-            "noauth",
-            mapOf()
-        )
-
+        inputPanel.loadRequestData(emptyList(), curlReq.headers, curlReq.body, "noauth", mapOf(), emptyList())
         JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("Imported cURL!", MessageType.INFO, null)
-            .setFadeoutTime(1500).createBalloon()
-            .show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
-
+            .setFadeoutTime(1500).createBalloon().show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
         return true
     }
 
@@ -182,11 +144,8 @@ class RequestEditorPanel(
         val curlCmd = CurlConverter.toCurl(tempReq)
         CopyPasteManager.getInstance().setContents(StringSelection(curlCmd))
         JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("cURL copied to clipboard!", MessageType.INFO, null)
-            .setFadeoutTime(1500).createBalloon()
-            .show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
+            .setFadeoutTime(1500).createBalloon().show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
     }
-
-    // --- 业务逻辑 ---
 
     fun createNewEmptyRequest() {
         activeCollectionNode = null
@@ -213,7 +172,7 @@ class RequestEditorPanel(
         }
         addressBar.url = url
         inputPanel.setBodyType("raw (json)")
-        inputPanel.loadRequestData(params, headers, body, "noauth", mapOf())
+        inputPanel.loadRequestData(params, headers, body, "noauth", mapOf(), emptyList())
         if (api.method.uppercase() in listOf("POST", "PUT")) inputPanel.selectedIndex = 3 else inputPanel.selectedIndex = 0
         responsePanel.clear()
     }
@@ -225,7 +184,7 @@ class RequestEditorPanel(
         addressBar.url = req.url
         val bType = if (req.bodyType.isNullOrBlank()) "raw (json)" else req.bodyType
         inputPanel.setBodyType(bType)
-        inputPanel.loadRequestData(req.params, req.headers, req.bodyContent, req.authType, req.authContent)
+        inputPanel.loadRequestData(req.params, req.headers, req.bodyContent, req.authType, req.authContent, req.extractRules)
         responsePanel.clear()
     }
 
@@ -239,6 +198,7 @@ class RequestEditorPanel(
         val (authType, authContent) = inputPanel.getAuthData()
         targetReq.authType = authType
         targetReq.authContent = authContent
+        targetReq.extractRules = inputPanel.getExtractRules() // [新增] 保存提取规则
     }
 
     private fun updateExistingRequest() {
@@ -291,7 +251,6 @@ class RequestEditorPanel(
 
         val headers = ArrayList<RestParam>()
         val headerStore = HeaderStore.getInstance(project)
-
         inputPanel.getHeaders().forEach {
             val v = resolveVariables(it.value)
             headers.add(RestParam(it.name, v, RestParam.ParamType.HEADER, "String"))
@@ -314,9 +273,8 @@ class RequestEditorPanel(
             val value = resolveVariables(authData["value"])
             val where = authData["where"] ?: "Header"
             if (!key.isNullOrBlank()) {
-                if (where == "Header") {
-                    headers.add(RestParam(key, value, RestParam.ParamType.HEADER, "String"))
-                } else {
+                if (where == "Header") headers.add(RestParam(key, value, RestParam.ParamType.HEADER, "String"))
+                else {
                     if (queryParamsBuilder.isEmpty()) queryParamsBuilder.append("?") else queryParamsBuilder.append("&")
                     queryParamsBuilder.append("$key=$value")
                 }
@@ -349,9 +307,21 @@ class RequestEditorPanel(
             }
             val finalResponse = RestResponse(response.statusCode, prettyBody, response.headers, response.durationMs)
 
+            // [新增] 执行变量提取
+            var extractedCount = 0
+            if (response.statusCode in 200..299) {
+                val rules = inputPanel.getExtractRules()
+                extractedCount = JsonExtractor.executeExtraction(response.body, rules, project)
+            }
+
             SwingUtilities.invokeLater {
                 addressBar.isBusy = false
                 responsePanel.updateResponse(finalResponse)
+                // 提示提取结果
+                if (extractedCount > 0) {
+                    JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("Extracted $extractedCount variables to Environment!", MessageType.INFO, null)
+                        .setFadeoutTime(3000).createBalloon().show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
+                }
             }
         }
     }

@@ -46,6 +46,10 @@ public class SavedRequest {
     @XCollection(style = XCollection.Style.v2)
     private List<RestParam> headers = new ArrayList<>();
 
+    @Tag("extractRules")
+    @XCollection(style = XCollection.Style.v2)
+    private List<ExtractRule> extractRules = new ArrayList<>();
+
     public SavedRequest() {}
 
     public SavedRequest(String name, String method, String url) {
@@ -71,14 +75,10 @@ public class SavedRequest {
     public void setAuthType(String authType) { this.authType = authType; }
     public Map<String, String> getAuthContent() { return authContent; }
     public void setAuthContent(Map<String, String> authContent) { this.authContent = authContent; }
-
-    public String getBodyType() {
-        return bodyType;
-    }
-
-    public void setBodyType(String bodyType) {
-        this.bodyType = bodyType;
-    }
+    public List<ExtractRule> getExtractRules() { return extractRules; }
+    public void setExtractRules(List<ExtractRule> extractRules) { this.extractRules = extractRules; }
+    public String getBodyType() {  return bodyType; }
+    public void setBodyType(String bodyType) { this.bodyType = bodyType; }
 
     @Override
     public String toString() { return name; }
