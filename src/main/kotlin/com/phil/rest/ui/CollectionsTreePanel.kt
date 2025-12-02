@@ -4,16 +4,21 @@ import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
+import com.intellij.openapi.fileChooser.FileSaverDescriptor
+import com.intellij.openapi.fileChooser.FileChooserFactory
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.SimpleToolWindowPanel
+import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.PopupHandler
 import com.intellij.ui.ScrollPaneFactory
 import com.intellij.ui.treeStructure.Tree
 import com.phil.rest.model.CollectionNode
 import com.phil.rest.service.CollectionService
+import com.phil.rest.service.PostmanExportService
 import com.phil.rest.service.PostmanImportService
 import java.awt.Component
+import java.io.File
 import javax.swing.tree.DefaultMutableTreeNode
 import javax.swing.tree.DefaultTreeModel
 import javax.swing.tree.TreeSelectionModel
@@ -35,7 +40,6 @@ class CollectionsTreePanel(
             cellRenderer = CollectionTreeCellRenderer()
         }
 
-        // 1. 左键点击选择
         tree.addTreeSelectionListener {
             val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return@addTreeSelectionListener
             val userObject = node.userObject
@@ -44,37 +48,66 @@ class CollectionsTreePanel(
             }
         }
 
-        // 2. 右键菜单 (解决重命名和删除问题)
+        // --- Actions 定义 ---
+
+        val renameAction = object : AnAction("Rename") {
+            override fun actionPerformed(e: AnActionEvent) {
+                val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
+                val userObject = node.userObject as? CollectionNode ?: return
+                val newName = Messages.showInputDialog(project, "Enter new name:", "Rename", Messages.getQuestionIcon(), userObject.name, null)
+                if (!newName.isNullOrBlank()) {
+                    userObject.name = newName
+                    treeModel.nodeChanged(node)
+                }
+            }
+        }
+
+        val deleteAction = object : AnAction("Delete", "Delete item", AllIcons.Actions.Cancel) {
+            override fun actionPerformed(e: AnActionEvent) {
+                val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
+                val userObject = node.userObject as? CollectionNode ?: return
+                if (Messages.showYesNoDialog(project, "Are you sure you want to delete '${userObject.name}'?", "Delete", Messages.getQuestionIcon()) == Messages.YES) {
+                    val service = CollectionService.getInstance(project)
+                    removeFromService(service.rootNodes, userObject)
+                    reloadTree()
+                }
+            }
+        }
+
+        // [Unified] 1. Export Selection (用于右键菜单)
+        val exportSelectionAction = object : AnAction("Export This", "Export selected item to JSON", AllIcons.ToolbarDecorator.Export) {
+            override fun actionPerformed(e: AnActionEvent) {
+                val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
+                val userObject = node.userObject as? CollectionNode ?: return
+
+                val listToExport = listOf(userObject)
+                exportToFile(listToExport, "${userObject.name}.postman_collection.json")
+            }
+        }
+
+        // [Unified] 2. Export All (用于工具栏)
+        val exportAllAction = object : AnAction("Export All", "Export all collections", AllIcons.Actions.MenuSaveall) {
+            override fun actionPerformed(e: AnActionEvent) {
+                val service = CollectionService.getInstance(project)
+                if (service.rootNodes.isEmpty()) {
+                    Messages.showWarningDialog("Nothing to export.", "Empty Collection")
+                    return
+                }
+                exportToFile(service.rootNodes, "${project.name}_All_Collections.postman_collection.json")
+            }
+        }
+
+        // 3. 右键菜单配置
         tree.addMouseListener(object : PopupHandler() {
             override fun invokePopup(comp: Component, x: Int, y: Int) {
                 val path = tree.getPathForLocation(x, y)
                 if (path != null) {
-                    tree.selectionPath = path // 选中当前右键的节点
-                    val node = path.lastPathComponent as DefaultMutableTreeNode
-                    val userObject = node.userObject as? CollectionNode
-
-                    // 创建右键菜单
+                    tree.selectionPath = path
                     val actionGroup = DefaultActionGroup()
-                    actionGroup.add(object : AnAction("Rename") {
-                        override fun actionPerformed(e: AnActionEvent) {
-                            val newName = Messages.showInputDialog(project, "Enter new name:", "Rename", Messages.getQuestionIcon(), userObject?.name, null)
-                            if (!newName.isNullOrBlank() && userObject != null) {
-                                userObject.name = newName
-                                treeModel.nodeChanged(node) // 刷新节点显示
-                            }
-                        }
-                    })
-
-                    actionGroup.add(object : AnAction("Delete", "Delete item", AllIcons.Actions.Cancel) {
-                        override fun actionPerformed(e: AnActionEvent) {
-                            if (Messages.showYesNoDialog(project, "Are you sure you want to delete '${userObject?.name}'?", "Delete", Messages.getQuestionIcon()) == Messages.YES) {
-                                // 从数据结构中移除 (这里简化处理，实际应该递归查找父节点移除)
-                                val service = CollectionService.getInstance(project)
-                                removeFromService(service.rootNodes, userObject)
-                                reloadTree()
-                            }
-                        }
-                    })
+                    actionGroup.add(renameAction)
+                    actionGroup.add(deleteAction)
+                    actionGroup.addSeparator()
+                    actionGroup.add(exportSelectionAction) // Export Selection
 
                     val popup = ActionManager.getInstance().createActionPopupMenu("CollectionTreePopup", actionGroup)
                     popup.component.show(comp, x, y)
@@ -82,13 +115,13 @@ class CollectionsTreePanel(
             }
         })
 
-        // --- 顶部工具栏 ---
+        // 4. 工具栏配置
         val actionManager = ActionManager.getInstance()
+
         val refreshAction = object : AnAction("Refresh", "Reload collections", AllIcons.Actions.Refresh) {
             override fun actionPerformed(e: AnActionEvent) { reloadTree() }
         }
 
-        // 修改：新建文件夹时弹窗命名
         val addFolderAction = object : AnAction("New Folder", "Create new folder", AllIcons.Nodes.Folder) {
             override fun actionPerformed(e: AnActionEvent) {
                 val folderName = Messages.showInputDialog(project, "Enter folder name:", "New Folder", Messages.getQuestionIcon(), "New Folder", null)
@@ -104,43 +137,25 @@ class CollectionsTreePanel(
             override fun actionPerformed(e: AnActionEvent) { onCreateNew() }
         }
 
-        // 4. Import 按钮 (下拉菜单里的)
-        // 实际上你可以把它放在工具栏上，或者像我们之前设计的那样放在一个 Group 里
-        // 这里假设我们放在工具栏上，或者是在一个名为 "Manage" 的 ActionGroup 里
-
-        val importAction = object : AnAction("Import Postman Collection", "Import from JSON file", AllIcons.Actions.Upload) {
+        val importAction = object : AnAction("Import Postman", "Import from JSON file", AllIcons.Actions.Upload) {
             override fun actionPerformed(e: AnActionEvent) {
-                // 1. 文件选择器
                 val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("json")
                 descriptor.title = "Select Postman Collection JSON"
                 val file = FileChooser.chooseFile(descriptor, project, null) ?: return
-
-                // 2. 调用 Service 解析
                 try {
                     val importer = PostmanImportService()
-                    // virtualFile -> io.File
-                    val importedNodes = importer.importCollection(java.io.File(file.path))
-
+                    val importedNodes = importer.importCollection(File(file.path))
                     if (importedNodes.isEmpty()) {
                         Messages.showWarningDialog("No items found in the collection.", "Import Failed")
                         return
                     }
-
-                    // 3. 存入 CollectionService
                     val service = CollectionService.getInstance(project)
-
-                    // 我们可以创建一个新的根文件夹来存放导入的内容，保持整洁
                     val importRoot = CollectionNode.createFolder(file.nameWithoutExtension)
                     importRoot.children = importedNodes
-
                     service.addRootNode(importRoot)
-
-                    // 4. 刷新界面
                     reloadTree()
                     Messages.showInfoMessage("Successfully imported ${importedNodes.size} items.", "Import Success")
-
                 } catch (ex: Exception) {
-                    ex.printStackTrace() // 打印堆栈方便调试
                     Messages.showErrorDialog("Error parsing Postman file: ${ex.message}", "Import Error")
                 }
             }
@@ -152,6 +167,7 @@ class CollectionsTreePanel(
         actionGroup.add(addRequestAction)
         actionGroup.addSeparator()
         actionGroup.add(importAction)
+        actionGroup.add(exportAllAction) // Export All
 
         val toolbar = actionManager.createActionToolbar("CollectionToolbar", actionGroup, true)
         toolbar.targetComponent = this
@@ -162,7 +178,22 @@ class CollectionsTreePanel(
         reloadTree()
     }
 
-    // 简单的递归删除辅助方法
+    private fun exportToFile(nodes: List<CollectionNode>, defaultFileName: String) {
+        val descriptor = FileSaverDescriptor("Export Collection", "Save as JSON file", "json")
+        val dialog = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)
+        val wrapper = dialog.save(null as VirtualFile?, defaultFileName)
+
+        if (wrapper != null) {
+            try {
+                val exporter = PostmanExportService()
+                exporter.exportCollections(nodes, wrapper.file)
+                Messages.showInfoMessage("Successfully exported to ${wrapper.file.name}.", "Export Success")
+            } catch (ex: Exception) {
+                Messages.showErrorDialog("Export failed: ${ex.message}", "Error")
+            }
+        }
+    }
+
     private fun removeFromService(nodes: MutableList<CollectionNode>, target: CollectionNode?): Boolean {
         if (target == null) return false
         if (nodes.remove(target)) return true
