@@ -1,12 +1,12 @@
 package com.phil.rest.ui.action
 
+import com.intellij.openapi.actionSystem.ActionUpdateThread
 import com.intellij.openapi.actionSystem.AnAction
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.actionSystem.ex.ComboBoxAction
 import com.intellij.openapi.project.DumbAware
 import com.intellij.openapi.project.Project
-import com.phil.rest.model.RestEnv
 import com.phil.rest.service.EnvService
 import com.phil.rest.ui.EnvManagerDialog
 import javax.swing.JComponent
@@ -17,6 +17,12 @@ class EnvironmentComboAction(
 ) : ComboBoxAction(), DumbAware {
 
     private val service = EnvService.getInstance(project)
+
+    // [修复 1] 必须显式指定 Action 更新线程
+    // 因为我们需要更新 UI (Presentation)，且逻辑很简单，选择 EDT (UI 线程)
+    override fun getActionUpdateThread(): ActionUpdateThread {
+        return ActionUpdateThread.EDT
+    }
 
     override fun createPopupActionGroup(button: JComponent?): DefaultActionGroup {
         val group = DefaultActionGroup()
