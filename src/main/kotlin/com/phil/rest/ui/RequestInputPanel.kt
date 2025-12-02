@@ -8,6 +8,7 @@ import com.intellij.openapi.fileTypes.PlainTextFileType
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
 import com.intellij.ui.EditorTextField
+import com.intellij.ui.JBColor
 import com.intellij.ui.ToolbarDecorator
 import com.intellij.ui.components.JBTabbedPane
 import com.intellij.ui.dsl.builder.AlignX
@@ -18,6 +19,7 @@ import com.phil.rest.service.HeaderStore
 import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.FlowLayout
+import java.awt.Font
 import java.net.URLDecoder
 import java.net.URLEncoder
 import java.nio.charset.StandardCharsets
@@ -39,23 +41,28 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
     private val bearerTokenField = JTextField()
     private val basicUserField = JTextField()
     private val basicPasswordField = JPasswordField()
-    // [新增] API Key 组件
+    // [Auth增强] API Key 组件
     private val apiKeyKeyField = JTextField()
     private val apiKeyValueField = JTextField()
     private val apiKeyLocationCombo = ComboBox(arrayOf("Header", "Query Params"))
 
     // --- Body ---
-    // [新增] 支持更多 Body 类型
+    // [Body增强] 支持更多 Body 类型
     private val bodyTypeCombo = ComboBox(arrayOf("none", "raw (json)", "raw (text)", "raw (xml)", "x-www-form-urlencoded"))
     // 使用 EditorTextField 以支持动态切换 FileType (JSON/XML/Text)
     private val bodyEditor = EditorTextField("", project, JsonFileType.INSTANCE)
 
-    // [新增] Form Data 表格
+    // [Body增强] Form Data 表格
     private val formTableModel = DefaultTableModel(arrayOf("Key", "Value"), 0)
     private val formTable = JBTable(formTableModel)
     private val bodyCardPanel = JPanel(CardLayout()) // 用于切换 Editor 和 Table
 
     init {
+        // [UI美化] 应用表格样式
+        styleTable(paramsTable)
+        styleTable(headersTable)
+        styleTable(formTable)
+
         // 1. Params Tab
         addTab("Params", createTablePanel(paramsTable, paramsTableModel))
 
@@ -70,7 +77,7 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         addTab("Body", createBodyPanel())
     }
 
-    // --- 数据获取 ---
+    // --- 公开 API: 数据获取 ---
 
     fun getQueryParams(): List<RestParam> = getTableData(paramsTableModel, RestParam.ParamType.QUERY)
     fun getHeaders(): List<RestParam> = getTableData(headersTableModel, RestParam.ParamType.HEADER)
@@ -79,7 +86,7 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         val type = bodyTypeCombo.selectedItem as String
         if (type == "none") return null
 
-        // [新增] 如果是 form-urlencoded，将表格转换为 k=v&k=v 字符串
+        // [Body增强] 如果是 form-urlencoded，将表格转换为 k=v&k=v 字符串
         if (type == "x-www-form-urlencoded") {
             val sb = StringBuilder()
             for (i in 0 until formTableModel.rowCount) {
@@ -124,7 +131,7 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         return typeCode to map
     }
 
-    // --- 数据加载 ---
+    // --- 公开 API: 数据加载 ---
 
     fun loadRequestData(params: List<RestParam>, headers: List<RestParam>, body: String?, authType: String, authContent: Map<String, String>) {
         // Params
@@ -138,13 +145,8 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         if (headersTableModel.rowCount == 0) headersTableModel.addRow(arrayOf("", ""))
 
         // Body
-        // [新增] 智能判断 Body 类型并恢复 UI 状态
-        // 这里我们简单根据内容判断，或者你应该在 SavedRequest 里存储 bodyType 字段
-        // 假设外部传入时已经设置好了 bodyTypeCombo 的状态，或者我们在这里做一点推断
-        // 为了简单，我们依赖 loadRequestData 调用前，bodyTypeCombo 已经被设置（通常是在 EditorPanel 里根据 SavedRequest.bodyType 设置）
-        // 但更好的做法是 RequestEditorPanel 显式设置 combo，然后再调这里。
-        // 这里我们只负责填数据。
-
+        // 外部（RequestEditorPanel）通常已经先调用 setBodyType 设置了正确的 Combo 状态
+        // 这里根据 Combo 状态来决定如何填充数据
         val currentType = bodyTypeCombo.selectedItem as String
         if (currentType == "x-www-form-urlencoded" && body != null) {
             // 解析 k=v&k=v -> Table
@@ -203,7 +205,21 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         selectedIndex = 0
     }
 
-    // --- UI 构建 ---
+    // --- UI 构建辅助方法 ---
+
+    // [UI美化] 统一表格样式
+    private fun styleTable(table: JBTable) {
+        table.rowHeight = 28 // 增加行高，更现代
+        table.setShowGrid(false) // 隐藏所有网格线
+        table.setShowHorizontalLines(true) // 只显示水平分隔线
+        table.gridColor = JBColor.border() // 淡色分割线
+        table.intercellSpacing = java.awt.Dimension(0, 0) // 去掉单元格间隙
+
+        // 表头字体
+        table.tableHeader.font = Font("JetBrains Mono", Font.BOLD, 12)
+        // 内容字体
+        table.font = Font("JetBrains Mono", Font.PLAIN, 13)
+    }
 
     private fun createTablePanel(table: JBTable, model: DefaultTableModel): JPanel {
         val decorator = ToolbarDecorator.createDecorator(table)
@@ -225,6 +241,7 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         val formPanel = createTablePanel(formTable, formTableModel)
 
         // Editor Panel
+        // EditorTextField 本身就是一个 Component
         val editorPanel = bodyEditor
 
         bodyCardPanel.add(editorPanel, "editor")
@@ -248,7 +265,7 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
                 }
             }
 
-            // 3. 启用/禁用
+            // 3. 启用/禁用控件
             val isNone = type == "none"
             bodyEditor.isEnabled = !isNone
             formTable.isEnabled = !isNone
@@ -277,7 +294,7 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
             row("Password:") { cell(basicPasswordField).align(AlignX.FILL) }
         }, "Basic Auth")
 
-        // [新增] API Key
+        // [Auth增强] API Key
         cardPanel.add(panel {
             row("Key:") { cell(apiKeyKeyField).align(AlignX.FILL) }
             row("Value:") { cell(apiKeyValueField).align(AlignX.FILL) }

@@ -25,27 +25,47 @@ class GeekAddressBar(
     var isBusy: Boolean = false
         set(value) {
             field = value
-            // 状态改变时重绘按钮
             sendBtn.repaint()
-            // 忙碌时鼠标变成默认，空闲时变成手型
             sendBtn.cursor = if (value) Cursor.getDefaultCursor() else Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         }
 
     // 1. Method 组件
     private val methodLabel = object : JLabel(selectedMethod) {
+        // [UI 优化] 增加悬停状态，提示可点击
+        private var isHover = false
+
         init {
             font = Font("JetBrains Mono", Font.BOLD, 14)
             foreground = UIConstants.getMethodColor(selectedMethod)
-            border = JBUI.Borders.empty(0, 12)
+            // 增加内边距，让背景色显示时更好看
+            border = JBUI.Borders.empty(4, 12)
+            isOpaque = false // 默认透明，paintComponent 里手动画背景
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
 
             addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(e: MouseEvent) {
-                    if (!isBusy) { // 忙碌时禁止切换 Method
-                        showMethodPopup(e.component as JComponent)
-                    }
+                    if (!isBusy) showMethodPopup(e.component as JComponent)
+                }
+                override fun mouseEntered(e: MouseEvent) {
+                    isHover = true
+                    repaint()
+                }
+                override fun mouseExited(e: MouseEvent) {
+                    isHover = false
+                    repaint()
                 }
             })
+        }
+
+        // [UI 优化] 绘制悬停背景
+        override fun paintComponent(g: Graphics) {
+            if (isHover && !isBusy) {
+                val g2 = g as Graphics2D
+                g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+                g2.color = JBColor.PanelBackground.darker() // 微微变暗
+                g2.fillRoundRect(2, 2, width - 4, height - 4, 6, 6)
+            }
+            super.paintComponent(g)
         }
     }
 
@@ -58,41 +78,28 @@ class GeekAddressBar(
         emptyText.text = "https://api.example.com/v1/..."
     }
 
-    // 3. Send 组件 (自定义绘制)
+    // 3. Send 组件 (保持不变，略)
     private val sendBtn = object : JComponent() {
         private var isHover = false
-
         init {
             preferredSize = Dimension(80, 0)
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
             addMouseListener(object : MouseAdapter() {
-                override fun mouseClicked(e: MouseEvent) {
-                    // [修复] 只有不忙的时候才触发
-                    if (!isBusy) {
-                        onSend()
-                    }
-                }
+                override fun mouseClicked(e: MouseEvent) { if (!isBusy) onSend() }
                 override fun mouseEntered(e: MouseEvent) { isHover = true; repaint() }
                 override fun mouseExited(e: MouseEvent) { isHover = false; repaint() }
             })
         }
-
         override fun paintComponent(g: Graphics) {
             val g2 = g as Graphics2D
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-
-            // [新增] 根据 isBusy 状态决定颜色
             val baseColor = if (isBusy) JBColor.GRAY else UIConstants.getMethodColor(selectedMethod)
-
             val color = if (isHover && !isBusy) baseColor.brighter() else baseColor
             g2.color = color
-
             val shape = RoundRectangle2D.Float(4f, 4f, width - 8f, height - 8f, 8f, 8f)
             g2.fill(shape)
-
             g2.color = Color.WHITE
             g2.font = Font("JetBrains Mono", Font.BOLD, 13)
-            // [新增] 忙碌时显示 "..."
             val text = if (isBusy) "..." else "SEND"
             val fm = g2.fontMetrics
             val x = (width - fm.stringWidth(text)) / 2
@@ -137,6 +144,7 @@ class GeekAddressBar(
         get() = urlField.text
         set(value) { urlField.text = value }
 
+    // [核心优化] 下拉框美化
     private fun showMethodPopup(component: JComponent) {
         val methods = listOf("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
 
@@ -149,14 +157,21 @@ class GeekAddressBar(
                 val m = value.toString()
                 c.text = m
                 c.foreground = UIConstants.getMethodColor(m)
-                c.font = Font("JetBrains Mono", Font.BOLD, 12)
+                c.font = Font("JetBrains Mono", Font.BOLD, 13) // 字体稍微大一点
+
+                // [关键] 增加 Padding：上下 8px，左右 15px
+                c.border = JBUI.Borders.empty(8, 15)
+
                 return c
             }
         })
 
-        builder.setFont(Font("JetBrains Mono", Font.BOLD, 12))
+        builder.setFont(Font("JetBrains Mono", Font.BOLD, 13))
         builder.setItemChosenCallback { method = it }
-        builder.createPopup().show(RelativePoint.getSouthWestOf(component))
+
+        // 去掉 Popup 的默认边框，看起来更扁平
+        val popup = builder.createPopup()
+        popup.show(RelativePoint.getSouthWestOf(component))
     }
 
     private class RoundedBorder(val color: Color) : javax.swing.border.AbstractBorder() {
