@@ -1,25 +1,31 @@
 package com.phil.rest.service;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.SerializationFeature;
 import com.intellij.openapi.project.Project;
 import com.intellij.psi.*;
 import com.intellij.psi.search.GlobalSearchScope;
 import com.intellij.psi.search.searches.AnnotatedElementsSearch;
+import com.intellij.psi.util.PsiTypesUtil;
+import com.intellij.psi.util.PsiUtil;
 import com.intellij.util.Query;
 import com.phil.rest.model.ApiDefinition;
 import com.phil.rest.model.RestParam;
 
-import java.util.ArrayList;
-import java.util.List;
+import java.util.*;
 
 public class SpringScannerService {
 
     private final Project project;
+    // 引入 Jackson 用于最终生成漂亮的 JSON 字符串
+    private final ObjectMapper objectMapper = new ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT);
 
     public SpringScannerService(Project project) {
         this.project = project;
     }
 
-    // 原有的扫描全项目方法
+    // --- 公开 API ---
+
     public List<ApiDefinition> scanCurrentProject() {
         List<ApiDefinition> apis = new ArrayList<>();
         GlobalSearchScope scope = GlobalSearchScope.projectScope(project);
@@ -44,19 +50,16 @@ public class SpringScannerService {
         return apis;
     }
 
-    // *** 新增：给 LineMarker 调用的单方法解析 ***
     public ApiDefinition parseSingleMethod(PsiMethod method) {
         PsiClass controllerClass = method.getContainingClass();
         if (controllerClass == null) return null;
-
-        // 检查类上是否有 RestController 或 Controller 注解 (可选，视需求而定)
-        // 这里简单处理：只要方法上有 Mapping 注解就尝试解析
 
         String baseUrl = extractPathFromAnnotation(controllerClass, "org.springframework.web.bind.annotation.RequestMapping");
         return parseMethod(method, baseUrl, controllerClass.getName());
     }
 
-    // 内部复用逻辑
+    // --- 核心解析逻辑 ---
+
     private ApiDefinition parseMethod(PsiMethod method, String baseUrl, String className) {
         String[][] mappings = {
                 {"org.springframework.web.bind.annotation.GetMapping", "GET"},
@@ -74,16 +77,12 @@ public class SpringScannerService {
                 String fullUrl = combinePaths(baseUrl, methodPath);
 
                 ApiDefinition api = new ApiDefinition(mapping[1], fullUrl, className, method.getName());
-                parseParameters(method, api); // 复用之前的参数解析逻辑
+                parseParameters(method, api);
                 return api;
             }
         }
         return null;
     }
-
-    // ... (parseParameters, isSimpleType, extractPathFromAnnotation 等辅助方法保持不变，请保留原有的) ...
-    // 为了节省篇幅，这里假设你保留了之前的 parseParameters 等私有方法。
-    // 如果没有，请把上次给你的代码里对应的 private 方法贴回来。
 
     private void parseParameters(PsiMethod method, ApiDefinition api) {
         PsiParameter[] parameters = method.getParameterList().getParameters();
@@ -92,6 +91,7 @@ public class SpringScannerService {
             String paramName = parameter.getName();
             String paramType = parameter.getType().getPresentableText();
 
+            // 1. @RequestParam
             PsiAnnotation requestParam = parameter.getAnnotation("org.springframework.web.bind.annotation.RequestParam");
             if (requestParam != null) {
                 String nameFromAnno = extractAttributeValue(requestParam, "value");
@@ -101,6 +101,7 @@ public class SpringScannerService {
                 continue;
             }
 
+            // 2. @PathVariable
             PsiAnnotation pathVar = parameter.getAnnotation("org.springframework.web.bind.annotation.PathVariable");
             if (pathVar != null) {
                 String nameFromAnno = extractAttributeValue(pathVar, "value");
@@ -109,22 +110,160 @@ public class SpringScannerService {
                 continue;
             }
 
+            // 3. @RequestBody [核心升级]
             PsiAnnotation requestBody = parameter.getAnnotation("org.springframework.web.bind.annotation.RequestBody");
             if (requestBody != null) {
-                api.addParam(new RestParam("body", "{}", RestParam.ParamType.BODY, paramType));
+                // 此时不给空 JSON，而是解析类型生成 Mock 数据
+                String jsonBody = generateJsonBody(parameter.getType());
+                api.addParam(new RestParam("body", jsonBody, RestParam.ParamType.BODY, paramType));
                 continue;
             }
 
-            if (isSimpleType(paramType)) {
+            // 4. Simple Types (无注解参数，默认为 Query)
+            if (isSimpleType(parameter.getType())) {
                 api.addParam(new RestParam(paramName, "", RestParam.ParamType.QUERY, paramType));
             }
         }
     }
 
-    private boolean isSimpleType(String type) {
-        return type.equals("String") || type.equals("int") || type.equals("Integer")
-                || type.equals("Long") || type.equals("boolean") || type.equals("Boolean");
+    // --- DTO 智能解析器 (Smart DTO Parser) ---
+
+    private String generateJsonBody(PsiType type) {
+        try {
+            // 使用 Map 构建对象结构，最后转 JSON
+            Object result = parseTypeRecursively(type, 0, new HashSet<>());
+            return objectMapper.writeValueAsString(result);
+        } catch (Exception e) {
+            return "{}"; // 降级处理
+        }
     }
+
+    /**
+     * 递归解析 PsiType 为 Java 对象 (Map, List, String, Integer...)
+     * @param type 当前类型
+     * @param depth 递归深度 (防止死循环)
+     * @param visited 这里的 visited 记录的是全限定类名，用于防止循环引用 (A -> B -> A)
+     */
+    private Object parseTypeRecursively(PsiType type, int depth, Set<String> visited) {
+        if (depth > 5) return null; // 深度限制
+
+        // 1. 基础类型与包装类
+        if (isSimpleType(type)) {
+            return getDefaultValueForSimpleType(type);
+        }
+
+        // 2. 数组类型 (e.g. String[], User[])
+        if (type instanceof PsiArrayType) {
+            PsiType componentType = ((PsiArrayType) type).getComponentType();
+            return Collections.singletonList(parseTypeRecursively(componentType, depth + 1, visited));
+        }
+
+        // 3. 集合类型 (Collection, List, Set)
+        PsiClass psiClass = PsiUtil.resolveClassInClassTypeOnly(type);
+        if (psiClass != null && isCollection(psiClass)) {
+            // 尝试获取泛型参数 List<User> -> User
+            PsiType innerType = PsiUtil.extractIterableTypeParameter(type, false);
+            if (innerType != null) {
+                return Collections.singletonList(parseTypeRecursively(innerType, depth + 1, visited));
+            }
+            return Collections.emptyList();
+        }
+
+        // 4. Map 类型
+        if (psiClass != null && isMap(psiClass)) {
+            return Collections.singletonMap("key", "value");
+        }
+
+        // 5. 枚举类型
+        if (psiClass != null && psiClass.isEnum()) {
+            PsiField[] fields = psiClass.getFields();
+            for (PsiField field : fields) {
+                if (field instanceof PsiEnumConstant) {
+                    return field.getName(); // 返回第一个枚举值
+                }
+            }
+            return "";
+        }
+
+        // 6. 普通对象 (POJO / DTO)
+        if (psiClass != null) {
+            String qName = psiClass.getQualifiedName();
+            if (qName != null && qName.startsWith("java.")) {
+                return null; // 忽略 java.* 内部类 (如 Class, Object)
+            }
+
+            // 循环引用检测
+            if (qName != null && visited.contains(qName)) {
+                return null;
+            }
+            Set<String> newVisited = new HashSet<>(visited);
+            if (qName != null) newVisited.add(qName);
+
+            Map<String, Object> map = new LinkedHashMap<>();
+            // 获取所有字段 (包含父类字段其实更复杂，这里暂只取当前类，或者用 getAllFields 但要注意性能)
+            for (PsiField field : psiClass.getAllFields()) {
+                if (field.hasModifierProperty(PsiModifier.STATIC) ||
+                        field.hasModifierProperty(PsiModifier.FINAL) ||
+                        field.hasModifierProperty(PsiModifier.TRANSIENT)) {
+                    continue;
+                }
+                map.put(field.getName(), parseTypeRecursively(field.getType(), depth + 1, newVisited));
+            }
+            return map;
+        }
+
+        return new Object(); // fallback
+    }
+
+    private boolean isSimpleType(PsiType type) {
+        String name = type.getPresentableText();
+        return isSimpleTypeStr(name);
+    }
+
+    // 辅助方法：判断是否为集合
+    private boolean isCollection(PsiClass psiClass) {
+        return inheritanceCheck(psiClass, "java.util.Collection");
+    }
+
+    // 辅助方法：判断是否为 Map
+    private boolean isMap(PsiClass psiClass) {
+        return inheritanceCheck(psiClass, "java.util.Map");
+    }
+
+    private boolean inheritanceCheck(PsiClass psiClass, String targetFqn) {
+        if (psiClass == null) return false;
+        if (targetFqn.equals(psiClass.getQualifiedName())) return true;
+        for (PsiClass sup : psiClass.getSupers()) {
+            if (inheritanceCheck(sup, targetFqn)) return true;
+        }
+        return false;
+    }
+
+    private Object getDefaultValueForSimpleType(PsiType type) {
+        String typeName = type.getPresentableText();
+        switch (typeName.toLowerCase()) {
+            case "int": case "integer": return 0;
+            case "long": return 0L;
+            case "double": case "float": case "bigdecimal": return 0.0;
+            case "boolean": return true;
+            case "string": return "";
+            case "date": case "localdate": case "localdatetime": return "2025-01-01 12:00:00";
+            default: return "";
+        }
+    }
+
+    private boolean isSimpleTypeStr(String type) {
+        // 包含常见的基础类型、包装类、String、Date
+        return type.equals("String") || type.equals("int") || type.equals("Integer")
+                || type.equals("long") || type.equals("Long")
+                || type.equals("double") || type.equals("Double")
+                || type.equals("float") || type.equals("Float")
+                || type.equals("boolean") || type.equals("Boolean")
+                || type.equals("BigDecimal")
+                || type.equals("Date") || type.equals("LocalDate") || type.equals("LocalDateTime");
+    }
+
+    // --- Annotation Helpers (保持不变) ---
 
     private String extractAttributeValue(PsiAnnotation annotation, String attribute) {
         PsiAnnotationMemberValue value = annotation.findAttributeValue(attribute);
