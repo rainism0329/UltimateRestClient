@@ -12,6 +12,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
@@ -21,21 +22,12 @@ import java.util.Map;
 public class HttpExecutor {
 
     static {
-        // 禁用 Hostname 验证 (支持 IP 直连 HTTPS)
         System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
     }
 
-    // [完美 Cookie 支持]
-    // 1. 全局单例 CookieManager: 保证 Cookie 在不同请求间共享
-    // 2. ACCEPT_ALL: 允许接收所有 Cookie (包括第三方)，这对开发测试最友好
     private static final CookieManager cookieManager = new CookieManager(null, CookiePolicy.ACCEPT_ALL);
-
-    // 使用静态单例 Client，复用连接池和 CookieStore
     private static final HttpClient client = createInsecureClient();
 
-    /**
-     * 清除所有 Cookie (模拟退出登录/清空缓存)
-     */
     public static void clearCookies() {
         cookieManager.getCookieStore().removeAll();
     }
@@ -49,21 +41,16 @@ public class HttpExecutor {
                         public void checkServerTrusted(X509Certificate[] certs, String authType) {}
                     }
             };
-
             SSLContext sslContext = SSLContext.getInstance("TLS");
             sslContext.init(null, trustAllCerts, new SecureRandom());
-
             return HttpClient.newBuilder()
                     .version(HttpClient.Version.HTTP_1_1)
                     .connectTimeout(Duration.ofSeconds(15))
                     .sslContext(sslContext)
                     .followRedirects(HttpClient.Redirect.NORMAL)
-                    .cookieHandler(cookieManager) // [关键] 注入 Cookie 管理器
+                    .cookieHandler(cookieManager)
                     .build();
-
         } catch (Exception e) {
-            System.err.println("Failed to create insecure HttpClient: " + e.getMessage());
-            // 降级，但也带上 Cookie 支持
             return HttpClient.newBuilder()
                     .version(HttpClient.Version.HTTP_1_1)
                     .connectTimeout(Duration.ofSeconds(10))
@@ -72,10 +59,10 @@ public class HttpExecutor {
         }
     }
 
-    public RestResponse execute(String method, String url, String body, List<RestParam> headers) {
-        if (!url.startsWith("http")) {
-            url = "http://" + url;
-        }
+    // [重构] 增加 multipartParams 参数
+    // 如果这个 list 不为空，则 body 参数被忽略，转而构建 Multipart
+    public RestResponse execute(String method, String url, String body, List<RestParam> headers, List<RestParam> multipartParams) {
+        if (!url.startsWith("http")) url = "http://" + url;
 
         long startTime = System.currentTimeMillis();
         try {
@@ -83,30 +70,50 @@ public class HttpExecutor {
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(30));
 
-            // 1. Content-Type 自动补全
-            boolean hasContentType = headers.stream().anyMatch(h -> "Content-Type".equalsIgnoreCase(h.getName()));
-            if (!hasContentType) {
-                if (body != null && !body.isBlank()) {
-                    builder.header("Content-Type", "application/json");
-                }
-            }
+            // 构建 Body Publisher
+            HttpRequest.BodyPublisher bodyPublisher;
 
-            // 2. 填充 Headers
-            for (RestParam header : headers) {
-                if (header.getName() != null && !header.getName().isBlank()) {
-                    String value = header.getValue() == null ? "" : header.getValue();
-                    try {
-                        builder.header(header.getName(), value);
-                    } catch (IllegalArgumentException e) {
-                        // ignore invalid headers
+            if (multipartParams != null && !multipartParams.isEmpty()) {
+                // --- Multipart 模式 ---
+                MultipartBodyPublisher multipartBuilder = new MultipartBodyPublisher();
+                for (RestParam param : multipartParams) {
+                    if ("File".equals(param.getDataType())) {
+                        // 是文件
+                        multipartBuilder.addPart(param.getName(), Path.of(param.getValue()));
+                    } else {
+                        // 是文本
+                        multipartBuilder.addPart(param.getName(), param.getValue());
                     }
                 }
+                bodyPublisher = multipartBuilder.buildSimple();
+
+                // 必须显式设置 Content-Type 并带上 boundary
+                builder.header("Content-Type", "multipart/form-data; boundary=" + multipartBuilder.getBoundary());
+            } else {
+                // --- 普通模式 ---
+                // 1. Content-Type 自动补全
+                boolean hasContentType = headers.stream().anyMatch(h -> "Content-Type".equalsIgnoreCase(h.getName()));
+                if (!hasContentType && body != null && !body.isBlank()) {
+                    builder.header("Content-Type", "application/json");
+                }
+
+                bodyPublisher = (body != null && !body.isBlank())
+                        ? HttpRequest.BodyPublishers.ofString(body)
+                        : HttpRequest.BodyPublishers.noBody();
             }
 
-            // 3. Body
-            HttpRequest.BodyPublisher bodyPublisher = (body != null && !body.isBlank())
-                    ? HttpRequest.BodyPublishers.ofString(body)
-                    : HttpRequest.BodyPublishers.noBody();
+            // 2. 填充 Headers (注意不要覆盖 Multipart 的 Content-Type)
+            for (RestParam header : headers) {
+                if (header.getName() != null && !header.getName().isBlank()) {
+                    // 如果是 Multipart 模式，跳过用户自定义的 Content-Type，防止覆盖 boundary
+                    if (multipartParams != null && !multipartParams.isEmpty() && "Content-Type".equalsIgnoreCase(header.getName())) {
+                        continue;
+                    }
+                    try {
+                        builder.header(header.getName(), header.getValue() == null ? "" : header.getValue());
+                    } catch (Exception e) {}
+                }
+            }
 
             switch (method.toUpperCase()) {
                 case "GET": builder.GET(); break;
@@ -114,24 +121,22 @@ public class HttpExecutor {
                 case "POST": builder.POST(bodyPublisher); break;
                 case "PUT": builder.PUT(bodyPublisher); break;
                 case "PATCH": builder.method("PATCH", bodyPublisher); break;
-                case "HEAD": builder.method("HEAD", HttpRequest.BodyPublishers.noBody()); break;
-                case "OPTIONS": builder.method("OPTIONS", HttpRequest.BodyPublishers.noBody()); break;
                 default: builder.method(method, bodyPublisher);
             }
 
             HttpResponse<String> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
             long duration = System.currentTimeMillis() - startTime;
 
-            return new RestResponse(
-                    response.statusCode(),
-                    response.body(),
-                    response.headers().map(),
-                    duration
-            );
+            return new RestResponse(response.statusCode(), response.body(), response.headers().map(), duration);
 
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - startTime;
             return new RestResponse(0, "Request Failed: " + e.toString(), Map.of(), duration);
         }
+    }
+
+    // 重载旧方法，保持兼容
+    public RestResponse execute(String method, String url, String body, List<RestParam> headers) {
+        return execute(method, url, body, headers, null);
     }
 }

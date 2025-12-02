@@ -239,7 +239,8 @@ class RequestEditorPanel(
         var finalUrl = resolveVariables(addressBar.url)
         val method = addressBar.method
         val finalBody = resolveVariables(inputPanel.getBody())
-        val bodyType = inputPanel.getBodyType()
+        // [Multipart] 获取 multipart 参数
+        val multipartParams = inputPanel.getMultipartParams()
 
         val params = inputPanel.getQueryParams()
         val queryParamsBuilder = StringBuilder()
@@ -286,11 +287,15 @@ class RequestEditorPanel(
 
         val hasContentType = headers.any { it.name.equals("Content-Type", ignoreCase = true) }
         if (!hasContentType) {
-            when (bodyType) {
-                "x-www-form-urlencoded" -> headers.add(RestParam("Content-Type", "application/x-www-form-urlencoded", RestParam.ParamType.HEADER, "String"))
-                "raw (json)" -> headers.add(RestParam("Content-Type", "application/json", RestParam.ParamType.HEADER, "String"))
-                "raw (xml)" -> headers.add(RestParam("Content-Type", "application/xml", RestParam.ParamType.HEADER, "String"))
-                "raw (text)" -> headers.add(RestParam("Content-Type", "text/plain", RestParam.ParamType.HEADER, "String"))
+            val bodyType = inputPanel.getBodyType()
+            // 注意：multipart/form-data 不需要手动加 Header，HttpExecutor 会自动生成带 boundary 的 Header
+            if (bodyType != "multipart/form-data") {
+                when (bodyType) {
+                    "x-www-form-urlencoded" -> headers.add(RestParam("Content-Type", "application/x-www-form-urlencoded", RestParam.ParamType.HEADER, "String"))
+                    "raw (json)" -> headers.add(RestParam("Content-Type", "application/json", RestParam.ParamType.HEADER, "String"))
+                    "raw (xml)" -> headers.add(RestParam("Content-Type", "application/xml", RestParam.ParamType.HEADER, "String"))
+                    "raw (text)" -> headers.add(RestParam("Content-Type", "text/plain", RestParam.ParamType.HEADER, "String"))
+                }
             }
         }
 
@@ -299,7 +304,9 @@ class RequestEditorPanel(
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val executor = HttpExecutor()
-            val response = executor.execute(method, finalUrl, finalBody, headers)
+            // [Multipart] 调用新的 execute 重载方法
+            val response = executor.execute(method, finalUrl, finalBody, headers, multipartParams)
+
             val prettyBody = if (response.body.trim().startsWith("{") || response.body.trim().startsWith("[")) {
                 formatJson(response.body)
             } else {
@@ -307,7 +314,6 @@ class RequestEditorPanel(
             }
             val finalResponse = RestResponse(response.statusCode, prettyBody, response.headers, response.durationMs)
 
-            // [新增] 执行变量提取
             var extractedCount = 0
             if (response.statusCode in 200..299) {
                 val rules = inputPanel.getExtractRules()
@@ -317,7 +323,6 @@ class RequestEditorPanel(
             SwingUtilities.invokeLater {
                 addressBar.isBusy = false
                 responsePanel.updateResponse(finalResponse)
-                // 提示提取结果
                 if (extractedCount > 0) {
                     JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("Extracted $extractedCount variables to Environment!", MessageType.INFO, null)
                         .setFadeoutTime(3000).createBalloon().show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
