@@ -1,0 +1,39 @@
+<svg width="16" height="16" viewBox="0 0 64 64" fill="none" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+        <linearGradient id="plasma_flow_gray" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#999999"/> <stop offset="100%" stop-color="#E6E6E6"/> </linearGradient>
+
+        <linearGradient id="core_bright_white" x1="0" y1="64" x2="64" y2="0" gradientUnits="userSpaceOnUse">
+            <stop offset="0%" stop-color="#F0F0F0"/>
+            <stop offset="100%" stop-color="#FFFFFF"/>
+        </linearGradient>
+
+        <filter id="plasma_glow_gray" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="3" in="SourceGraphic" result="wideBlur"/>
+            <feMerge>
+                <feMergeNode in="wideBlur"/>
+            </feMerge>
+        </filter>
+    </defs>
+
+    <path id="brackets_path_g" d="M22 12H18C14.6863 12 12 14.6863 12 18V26C12 29.3137 9.31371 32 6 32 M6 32C9.31371 32 12 34.6863 12 38V46C12 49.3137 14.6863 52 18 52H22 M42 12H46C49.3137 12 52 14.6863 52 18V26C52 29.3137 54.6863 32 58 32 M58 32C54.6863 32 52 34.6863 52 38V46C52 49.3137 49.3137 52 46 52H42" stroke-linecap="round" stroke-linejoin="round"/>
+    <path id="bolt_path_g" d="M36 12L24 35H32L28 52L40 29H32L36 12Z" stroke-linecap="round" stroke-linejoin="round"/>
+
+    <g filter="url(#plasma_glow_gray)" stroke="url(#plasma_flow_gray)" stroke-width="5" fill="none" opacity="0.5">
+        <use href="#brackets_path_g"/>
+        <use href="#bolt_path_g"/>
+    </g>
+
+    <g stroke="url(#plasma_flow_gray)" stroke-width="3" fill="none">
+        <use href="#brackets_path_g"/>
+        <use href="#bolt_path_g"/>
+    </g>
+
+    <g stroke="url(#core_bright_white)" stroke-width="1.5" fill="none">
+        <use href="#brackets_path_g"/>
+        <use href="#bolt_path_g"/>
+    </g>
+
+    <circle cx="6" cy="32" r="1.5" fill="white" filter="url(#plasma_glow_gray)"/>
+    <circle cx="58" cy="32" r="1.5" fill="white" filter="url(#plasma_glow_gray)"/>
+</svg>

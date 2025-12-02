@@ -24,7 +24,7 @@
         <toolWindow id="UltimateREST"
                     anchor="right"
                     factoryClass="com.phil.rest.ui.RestClientToolWindowFactory"
-                    icon="AllIcons.General.Web"
+                    icon="/icons/icon.svg"
                     canCloseContents="false"/>
         <projectService serviceImplementation="com.phil.rest.service.CollectionService"/>
         <projectService serviceImplementation="com.phil.rest.service.EnvService"/>
