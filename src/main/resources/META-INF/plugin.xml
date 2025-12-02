@@ -1,33 +1,78 @@
 <idea-plugin>
     <id>com.phil.ultimate.rest.client</id>
 
-    <name>Ultimate REST Client</name>
+    <name>RestPilot - Smart Spring Boot Client</name>
 
     <vendor url="https://phil-zhang.netlify.app/" email="bigphil.zhang@qq.com">Phil Zhang</vendor>
 
     <description><![CDATA[
-    <p>A powerful REST client fully integrated into IntelliJ IDEA, designed to be stronger than Postman.</p>
+    <h1>The Missing Link Between Your Code and API Testing</h1>
+    <p>
+        Stop switching between IntelliJ IDEA and Postman. <b>RestPilot</b> allows you to generate, debug, and test your Spring Boot APIs directly from your source code.
+    </p>
+    <p>
+        It scans your <code>@Controller</code> code in real-time, intelligently analyzes your DTOs, and provides a powerful HTTP client right next to your editor.
+    </p>
+
     <br/>
-    <h3>Key Features:</h3>
+    <h2>✨ Key Features</h2>
     <ul>
-        <li><strong>Smart Scanning:</strong> Automatically scan Spring Boot Controllers to generate API requests.</li>
-        <li><strong>Postman Compatible:</strong> Import your existing Postman collections seamlessly.</li>
-        <li><strong>Code Integration:</strong> Navigate directly from request UI to Java code (Controller methods).</li>
+        <li>
+            <b>🧠 Smart DTO Analysis:</b> Automatically recursively parses your request body classes (DTOs) to generate complete JSON payloads with default values. No more typing JSON by hand!
+        </li>
+        <li>
+            <b>🔍 Live Code Scanning:</b> Detects <code>@GetMapping</code>, <code>@PostMapping</code>, etc., instantly. Just click the "Run" icon in the gutter to test.
+        </li>
+        <li>
+            <b>⚡ cURL Interop:</b>
+            <ul>
+                <li><b>Import:</b> Paste any cURL command (from Chrome/Docs) to auto-fill the request.</li>
+                <li><b>Export:</b> Copy any request as cURL to share with your team.</li>
+            </ul>
+        </li>
+        <li>
+            <b>🤝 Postman Compatible:</b> Seamlessly import your existing Postman Collections and export your tests back to standard Postman JSON format.
+        </li>
+        <li>
+            <b>🔌 Protocol Master:</b> Full support for <b>Multipart Uploads</b> (File/Text), <b>Cookies/Session</b> management, and diverse Auth methods (Bearer, Basic, API Key).
+        </li>
+        <li>
+            <b>🔗 Automation:</b> Extract values from responses (e.g., Tokens) and automatically save them to Environment Variables for the next request.
+        </li>
+        <li>
+            <b>🧭 Bi-directional Navigation:</b> Jump from the API tree directly to the Controller method definition with one click.
+        </li>
     </ul>
+
+    <br/>
+    <p><i>Designed for developers who want to stay in the "Flow".</i></p>
     ]]></description>
+
+    <change-notes><![CDATA[
+    <h3>1.0.0 Initial Release</h3>
+    <ul>
+        <li>🎉 Initial release of RestPilot.</li>
+        <li>Support Spring Boot annotation scanning.</li>
+        <li>Support Postman Collection import/export.</li>
+        <li>Support cURL import/copy.</li>
+        <li>Smart JSON body generation from Java DTOs.</li>
+    </ul>
+    ]]></change-notes>
 
     <depends>com.intellij.modules.platform</depends>
     <depends>com.intellij.modules.java</depends>
     <depends>com.intellij.modules.json</depends>
 
     <extensions defaultExtensionNs="com.intellij">
-        <toolWindow id="UltimateREST"
+        <toolWindow id="RestPilot"
                     anchor="right"
                     factoryClass="com.phil.rest.ui.RestClientToolWindowFactory"
                     icon="/icons/icon.svg"
                     canCloseContents="false"/>
+
         <projectService serviceImplementation="com.phil.rest.service.CollectionService"/>
         <projectService serviceImplementation="com.phil.rest.service.EnvService"/>
+
         <codeInsight.lineMarkerProvider
                 language="JAVA"
                 implementationClass="com.phil.rest.ui.linemarker.RestLineMarkerProvider"/>
