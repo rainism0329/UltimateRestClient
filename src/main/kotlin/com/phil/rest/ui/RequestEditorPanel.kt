@@ -6,20 +6,28 @@ import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.application.ApplicationManager
+import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
+import com.intellij.openapi.ui.MessageType
+import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.SimpleToolWindowPanel
+import com.intellij.openapi.ui.popup.Balloon
+import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.util.Disposer
 import com.intellij.ui.JBSplitter
+import com.intellij.ui.awt.RelativePoint
 import com.intellij.util.ui.JBUI
 import com.phil.rest.model.*
 import com.phil.rest.service.CollectionService
+import com.phil.rest.service.CurlConverter
 import com.phil.rest.service.EnvService
 import com.phil.rest.service.HeaderStore
 import com.phil.rest.service.HttpExecutor
 import com.phil.rest.ui.action.EnvironmentComboAction
 import com.phil.rest.ui.component.GeekAddressBar
 import java.awt.BorderLayout
+import java.awt.datatransfer.StringSelection
 import java.util.*
 import javax.swing.JPanel
 import javax.swing.SwingUtilities
@@ -32,7 +40,10 @@ class RequestEditorPanel(
     private var activeCollectionNode: CollectionNode? = null
     private val objectMapper = ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT)
 
-    private val addressBar = GeekAddressBar(project) { sendRequest() }
+    private val addressBar = GeekAddressBar(project, { sendRequest() }, { curlText ->
+        importCurl(curlText)
+    })
+
     private val inputPanel = RequestInputPanel(project)
     private val responsePanel = ResponsePanel(project)
 
@@ -61,7 +72,6 @@ class RequestEditorPanel(
 
         setContent(mainContent)
 
-        // [Shortcut] 注册 Ctrl+Enter
         val sendAction = object : DumbAwareAction() {
             override fun actionPerformed(e: AnActionEvent) { sendRequest() }
         }
@@ -73,6 +83,45 @@ class RequestEditorPanel(
     private fun createTopToolbar(): ActionToolbar {
         val actionGroup = DefaultActionGroup()
         actionGroup.add(EnvironmentComboAction(project) {})
+
+        // [新增] Clear Cookies 按钮
+        actionGroup.add(object : DumbAwareAction("Clear Cookies", "Clear all session cookies", AllIcons.Actions.GC) {
+            override fun actionPerformed(e: AnActionEvent) {
+                HttpExecutor.clearCookies()
+                JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("Cookies Cleared!", MessageType.INFO, null)
+                    .setFadeoutTime(1500).createBalloon()
+                    .show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
+            }
+        })
+
+        actionGroup.addSeparator()
+
+        // Import cURL
+        actionGroup.add(object : DumbAwareAction("Import cURL", "Paste cURL command to import", AllIcons.Actions.Upload) {
+            override fun actionPerformed(e: AnActionEvent) {
+                val curlText = Messages.showMultilineInputDialog(
+                    project,
+                    "Paste your cURL command here:",
+                    "Import cURL",
+                    null,
+                    Messages.getQuestionIcon(),
+                    null
+                )
+                if (!curlText.isNullOrBlank()) {
+                    if (!importCurl(curlText)) {
+                        Messages.showErrorDialog("Invalid cURL command format.", "Import Failed")
+                    }
+                }
+            }
+        })
+
+        // Copy as cURL
+        actionGroup.add(object : DumbAwareAction("Copy as cURL", "Copy request as cURL command", AllIcons.Actions.Copy) {
+            override fun actionPerformed(e: AnActionEvent) {
+                copyAsCurl()
+            }
+        })
+
         actionGroup.addSeparator()
 
         val saveAction = object : DumbAwareAction("Save", "Save current request", AllIcons.Actions.MenuSaveall) {
@@ -96,6 +145,47 @@ class RequestEditorPanel(
         return ActionManager.getInstance().createActionToolbar("RestClientTopToolbar", actionGroup, true)
     }
 
+    // --- cURL 逻辑 ---
+
+    private fun importCurl(curlText: String): Boolean {
+        val curlReq = CurlConverter.parseCurl(curlText) ?: return false
+
+        addressBar.method = curlReq.method
+        addressBar.url = curlReq.url
+
+        var bodyType = "raw (json)"
+        if (curlReq.contentType != null) {
+            if (curlReq.contentType.contains("xml")) bodyType = "raw (xml)"
+            else if (curlReq.contentType.contains("text")) bodyType = "raw (text)"
+            else if (curlReq.contentType.contains("form-urlencoded")) bodyType = "x-www-form-urlencoded"
+        }
+        inputPanel.setBodyType(bodyType)
+
+        inputPanel.loadRequestData(
+            emptyList(),
+            curlReq.headers,
+            curlReq.body,
+            "noauth",
+            mapOf()
+        )
+
+        JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("Imported cURL!", MessageType.INFO, null)
+            .setFadeoutTime(1500).createBalloon()
+            .show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
+
+        return true
+    }
+
+    private fun copyAsCurl() {
+        val tempReq = SavedRequest()
+        collectData(tempReq)
+        val curlCmd = CurlConverter.toCurl(tempReq)
+        CopyPasteManager.getInstance().setContents(StringSelection(curlCmd))
+        JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("cURL copied to clipboard!", MessageType.INFO, null)
+            .setFadeoutTime(1500).createBalloon()
+            .show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
+    }
+
     // --- 业务逻辑 ---
 
     fun createNewEmptyRequest() {
@@ -110,11 +200,9 @@ class RequestEditorPanel(
         activeCollectionNode = null
         addressBar.method = api.method.uppercase()
         var url = "http://localhost:8080" + api.url
-
         val params = ArrayList<RestParam>()
         val headers = ArrayList<RestParam>()
         var body = ""
-
         api.params.forEach { param ->
             when (param.type) {
                 RestParam.ParamType.PATH -> url = url.replace("{${param.name}}", param.value)
@@ -124,7 +212,6 @@ class RequestEditorPanel(
             }
         }
         addressBar.url = url
-        // 默认类型 raw (json)
         inputPanel.setBodyType("raw (json)")
         inputPanel.loadRequestData(params, headers, body, "noauth", mapOf())
         if (api.method.uppercase() in listOf("POST", "PUT")) inputPanel.selectedIndex = 3 else inputPanel.selectedIndex = 0
@@ -136,13 +223,8 @@ class RequestEditorPanel(
         val req = node.request ?: return
         addressBar.method = req.method.uppercase()
         addressBar.url = req.url
-
-        // [新增] 恢复 Body Type (如果 SavedRequest 有这个字段最好，没有则根据 bodyType 属性或者默认)
-        // 假设 SavedRequest 有 bodyType 属性 (你上传的代码里有: @Attribute("bodyType") private String bodyType;)
-        // 如果为空，默认为 raw (json)
         val bType = if (req.bodyType.isNullOrBlank()) "raw (json)" else req.bodyType
         inputPanel.setBodyType(bType)
-
         inputPanel.loadRequestData(req.params, req.headers, req.bodyContent, req.authType, req.authContent)
         responsePanel.clear()
     }
@@ -150,11 +232,8 @@ class RequestEditorPanel(
     private fun collectData(targetReq: SavedRequest) {
         targetReq.method = addressBar.method
         targetReq.url = addressBar.url
-
-        // [新增] 保存 Body 类型
         targetReq.bodyType = inputPanel.getBodyType()
         targetReq.bodyContent = inputPanel.getBody()
-
         targetReq.params = inputPanel.getQueryParams()
         targetReq.headers = inputPanel.getHeaders()
         val (authType, authContent) = inputPanel.getAuthData()
@@ -219,7 +298,6 @@ class RequestEditorPanel(
             headerStore.recordHeader(it.name)
         }
 
-        // --- [新增] Auth 逻辑处理 ---
         val (authType, authData) = inputPanel.getAuthData()
         if (authType == "bearer") {
             val token = resolveVariables(authData["token"])
@@ -232,27 +310,22 @@ class RequestEditorPanel(
                 headers.add(RestParam("Authorization", "Basic $encoded", RestParam.ParamType.HEADER, "String"))
             }
         } else if (authType == "apikey") {
-            // [API Key] 支持 Header 和 Query
             val key = resolveVariables(authData["key"])
             val value = resolveVariables(authData["value"])
             val where = authData["where"] ?: "Header"
-
             if (!key.isNullOrBlank()) {
                 if (where == "Header") {
                     headers.add(RestParam(key, value, RestParam.ParamType.HEADER, "String"))
                 } else {
-                    // 添加到 Query Params
                     if (queryParamsBuilder.isEmpty()) queryParamsBuilder.append("?") else queryParamsBuilder.append("&")
                     queryParamsBuilder.append("$key=$value")
                 }
             }
         }
 
-        // 拼接 URL
         if (!finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += queryParamsBuilder.toString()
         else if (finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += "&" + queryParamsBuilder.substring(1)
 
-        // --- [新增] Content-Type 自动补全 ---
         val hasContentType = headers.any { it.name.equals("Content-Type", ignoreCase = true) }
         if (!hasContentType) {
             when (bodyType) {
@@ -269,14 +342,11 @@ class RequestEditorPanel(
         ApplicationManager.getApplication().executeOnPooledThread {
             val executor = HttpExecutor()
             val response = executor.execute(method, finalUrl, finalBody, headers)
-
-            // 只有 JSON 尝试格式化，XML/HTML 暂不处理
             val prettyBody = if (response.body.trim().startsWith("{") || response.body.trim().startsWith("[")) {
                 formatJson(response.body)
             } else {
                 response.body
             }
-
             val finalResponse = RestResponse(response.statusCode, prettyBody, response.headers, response.durationMs)
 
             SwingUtilities.invokeLater {

@@ -9,6 +9,7 @@ import com.intellij.ui.components.JBTextField
 import com.intellij.util.ui.JBUI
 import com.phil.rest.ui.render.UIConstants
 import java.awt.*
+import java.awt.datatransfer.DataFlavor
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.geom.RoundRectangle2D
@@ -16,12 +17,13 @@ import javax.swing.*
 
 class GeekAddressBar(
     private val project: Project,
-    private val onSend: () -> Unit
+    private val onSend: () -> Unit,
+    // [新增] 导入 cURL 回调，返回 true 表示成功处理了 cURL
+    private val onImportCurl: (String) -> Boolean
 ) : JPanel(BorderLayout()) {
 
     private var selectedMethod = "GET"
 
-    // [新增] 控制发送状态
     var isBusy: Boolean = false
         set(value) {
             field = value
@@ -29,40 +31,29 @@ class GeekAddressBar(
             sendBtn.cursor = if (value) Cursor.getDefaultCursor() else Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
         }
 
-    // 1. Method 组件
+    // 1. Method 组件 (保持不变)
     private val methodLabel = object : JLabel(selectedMethod) {
-        // [UI 优化] 增加悬停状态，提示可点击
         private var isHover = false
-
         init {
             font = Font("JetBrains Mono", Font.BOLD, 14)
             foreground = UIConstants.getMethodColor(selectedMethod)
-            // 增加内边距，让背景色显示时更好看
             border = JBUI.Borders.empty(4, 12)
-            isOpaque = false // 默认透明，paintComponent 里手动画背景
+            isOpaque = false
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
 
             addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(e: MouseEvent) {
                     if (!isBusy) showMethodPopup(e.component as JComponent)
                 }
-                override fun mouseEntered(e: MouseEvent) {
-                    isHover = true
-                    repaint()
-                }
-                override fun mouseExited(e: MouseEvent) {
-                    isHover = false
-                    repaint()
-                }
+                override fun mouseEntered(e: MouseEvent) { isHover = true; repaint() }
+                override fun mouseExited(e: MouseEvent) { isHover = false; repaint() }
             })
         }
-
-        // [UI 优化] 绘制悬停背景
         override fun paintComponent(g: Graphics) {
             if (isHover && !isBusy) {
                 val g2 = g as Graphics2D
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g2.color = JBColor.PanelBackground.darker() // 微微变暗
+                g2.color = JBColor.PanelBackground.darker()
                 g2.fillRoundRect(2, 2, width - 4, height - 4, 6, 6)
             }
             super.paintComponent(g)
@@ -76,9 +67,35 @@ class GeekAddressBar(
         background = null
         isOpaque = false
         emptyText.text = "https://api.example.com/v1/..."
+
+        // [核心逻辑] 拦截粘贴事件
+        transferHandler = object : TransferHandler() {
+            override fun importData(support: TransferSupport): Boolean {
+                if (canImport(support)) {
+                    try {
+                        val text = support.transferable.getTransferData(DataFlavor.stringFlavor) as String
+                        // 尝试识别 cURL
+                        if (text.trim().startsWith("curl", ignoreCase = true)) {
+                            // 调用回调，如果处理成功，则不再执行默认粘贴
+                            if (onImportCurl(text)) {
+                                return true
+                            }
+                        }
+                    } catch (e: Exception) {
+                        e.printStackTrace()
+                    }
+                }
+                // 否则执行默认行为 (普通粘贴)
+                return super.importData(support)
+            }
+
+            override fun canImport(support: TransferSupport): Boolean {
+                return support.isDataFlavorSupported(DataFlavor.stringFlavor)
+            }
+        }
     }
 
-    // 3. Send 组件 (保持不变，略)
+    // 3. Send 组件 (保持不变)
     private val sendBtn = object : JComponent() {
         private var isHover = false
         init {
@@ -144,10 +161,8 @@ class GeekAddressBar(
         get() = urlField.text
         set(value) { urlField.text = value }
 
-    // [核心优化] 下拉框美化
     private fun showMethodPopup(component: JComponent) {
         val methods = listOf("GET", "POST", "PUT", "DELETE", "PATCH", "HEAD", "OPTIONS")
-
         val builder = JBPopupFactory.getInstance().createPopupChooserBuilder(methods)
         builder.setRenderer(object : DefaultListCellRenderer() {
             override fun getListCellRendererComponent(
@@ -157,21 +172,14 @@ class GeekAddressBar(
                 val m = value.toString()
                 c.text = m
                 c.foreground = UIConstants.getMethodColor(m)
-                c.font = Font("JetBrains Mono", Font.BOLD, 13) // 字体稍微大一点
-
-                // [关键] 增加 Padding：上下 8px，左右 15px
+                c.font = Font("JetBrains Mono", Font.BOLD, 13)
                 c.border = JBUI.Borders.empty(8, 15)
-
                 return c
             }
         })
-
         builder.setFont(Font("JetBrains Mono", Font.BOLD, 13))
         builder.setItemChosenCallback { method = it }
-
-        // 去掉 Popup 的默认边框，看起来更扁平
-        val popup = builder.createPopup()
-        popup.show(RelativePoint.getSouthWestOf(component))
+        builder.createPopup().show(RelativePoint.getSouthWestOf(component))
     }
 
     private class RoundedBorder(val color: Color) : javax.swing.border.AbstractBorder() {
