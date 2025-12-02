@@ -1,22 +1,29 @@
 package com.phil.rest.ui
 
 import com.intellij.icons.AllIcons
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.*
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.SimpleToolWindowPanel
+import com.intellij.openapi.util.Disposer
 import com.intellij.ui.OnePixelSplitter
 import com.phil.rest.model.ApiDefinition
 import com.phil.rest.model.CollectionNode
 
-class RestClientMainPanel(private val project: Project) : SimpleToolWindowPanel(true, true) {
+// [修改] 显式实现 Disposable 接口，解决 Disposer.register 报错
+class RestClientMainPanel(private val project: Project) : SimpleToolWindowPanel(true, true), Disposable {
 
     private val requestEditor: RequestEditorPanel
     private val navPanel: NavigationPanel
     private val splitter: OnePixelSplitter
 
     init {
-        // 1. 初始化组件 (保持不变)
+        // 1. 初始化组件
         requestEditor = RequestEditorPanel(project) { refreshCollectionsTree() }
+
+        // [修改] 注册子组件的生命周期，确保 MainPanel 销毁时 RequestEditorPanel 也被销毁
+        Disposer.register(this, requestEditor)
+
         navPanel = NavigationPanel(project, { selectedObject ->
             when (selectedObject) {
                 is ApiDefinition -> requestEditor.renderApi(selectedObject)
@@ -24,13 +31,12 @@ class RestClientMainPanel(private val project: Project) : SimpleToolWindowPanel(
             }
         }, { requestEditor.createNewEmptyRequest() })
 
-        // 2. 初始化 Splitter (默认左右分割)
-        // proportion = 0.2f 让左侧变窄，解决"右侧被挤压"感
+        // 2. 初始化 Splitter
         splitter = OnePixelSplitter(false, 0.2f)
         splitter.firstComponent = navPanel
         splitter.secondComponent = requestEditor
 
-        // 3. 创建顶部工具栏 (用于切换布局)
+        // 3. 创建顶部工具栏
         val toolbar = createToolbar()
         toolbar.targetComponent = this
         setToolbar(toolbar.component)
@@ -41,14 +47,10 @@ class RestClientMainPanel(private val project: Project) : SimpleToolWindowPanel(
     private fun createToolbar(): ActionToolbar {
         val actionGroup = DefaultActionGroup()
 
-        // 布局切换按钮
         val toggleLayoutAction = object : AnAction("Switch Layout", "Toggle horizontal/vertical split", AllIcons.Actions.SplitVertically) {
             override fun actionPerformed(e: AnActionEvent) {
-                // 切换 orientation
                 val isVertical = splitter.orientation
                 splitter.orientation = !isVertical
-
-                // 更新图标
                 e.presentation.icon = if (isVertical) AllIcons.Actions.SplitVertically else AllIcons.Actions.SplitHorizontally
             }
         }
@@ -63,8 +65,12 @@ class RestClientMainPanel(private val project: Project) : SimpleToolWindowPanel(
         collectionTab?.reloadTree()
     }
 
-    // LineMarker 调用入口
     fun openApiFromCode(api: ApiDefinition) {
         requestEditor.renderApi(api)
+    }
+
+    // [修改] 实现 dispose 方法 (虽然这里没逻辑，但必须有这个方法才能当 Disposable 用)
+    override fun dispose() {
+        // 子组件会自动被 Disposer 释放，这里不需要手动调用
     }
 }

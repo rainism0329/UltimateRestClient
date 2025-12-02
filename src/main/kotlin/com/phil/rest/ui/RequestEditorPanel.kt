@@ -3,32 +3,17 @@ package com.phil.rest.ui
 import com.fasterxml.jackson.databind.ObjectMapper
 import com.fasterxml.jackson.databind.SerializationFeature
 import com.intellij.icons.AllIcons
-import com.intellij.json.JsonLanguage
+import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.ActionManager
 import com.intellij.openapi.actionSystem.ActionToolbar
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.actionSystem.DefaultActionGroup
 import com.intellij.openapi.application.ApplicationManager
-import com.intellij.openapi.command.WriteCommandAction
-import com.intellij.openapi.fileChooser.FileChooserFactory
-import com.intellij.openapi.fileChooser.FileSaverDescriptor
-import com.intellij.openapi.ide.CopyPasteManager
 import com.intellij.openapi.project.DumbAwareAction
 import com.intellij.openapi.project.Project
-import com.intellij.openapi.ui.ComboBox
-import com.intellij.openapi.ui.MessageType
 import com.intellij.openapi.ui.SimpleToolWindowPanel
-import com.intellij.openapi.ui.popup.Balloon
-import com.intellij.openapi.ui.popup.JBPopupFactory
-import com.intellij.openapi.vfs.VirtualFile
-import com.intellij.ui.LanguageTextField
-import com.intellij.ui.ToolbarDecorator
-import com.intellij.ui.awt.RelativePoint
-import com.intellij.ui.components.JBLabel
-import com.intellij.ui.components.JBTabbedPane
-import com.intellij.ui.dsl.builder.AlignX
-import com.intellij.ui.dsl.builder.panel
-import com.intellij.ui.table.JBTable
+import com.intellij.openapi.util.Disposer // 引入 Disposer
+import com.intellij.ui.JBSplitter
 import com.intellij.util.ui.JBUI
 import com.phil.rest.model.*
 import com.phil.rest.service.CollectionService
@@ -38,99 +23,64 @@ import com.phil.rest.service.HttpExecutor
 import com.phil.rest.ui.action.EnvironmentComboAction
 import com.phil.rest.ui.component.GeekAddressBar
 import java.awt.BorderLayout
-import java.awt.CardLayout
-import java.awt.Color
-import java.awt.FlowLayout
-import java.awt.datatransfer.StringSelection
 import java.util.*
-import javax.swing.*
-import javax.swing.table.DefaultTableModel
+import javax.swing.JPanel
+import javax.swing.SwingUtilities
 
+// [修改] 实现 Disposable
 class RequestEditorPanel(
     private val project: Project,
     private val onSaveSuccess: () -> Unit
-) : SimpleToolWindowPanel(true, true) {
+) : SimpleToolWindowPanel(true, true), Disposable {
 
     private var activeCollectionNode: CollectionNode? = null
-
-    // --- 核心组件 ---
-    private val addressBar = GeekAddressBar(project) { sendRequest() }
-
-    // --- Tabs ---
-    private val tabbedPane = JBTabbedPane()
-
-    // Params
-    private val paramsTableModel = DefaultTableModel(arrayOf("Key", "Value"), 0)
-    private val paramsTable = JBTable(paramsTableModel)
-
-    // Auth
-    private val authTypeCombo = ComboBox(arrayOf("No Auth", "Bearer Token", "Basic Auth"))
-    private val bearerTokenField = JTextField()
-    private val basicUserField = JTextField()
-    private val basicPasswordField = JPasswordField()
-
-    // Headers
-    private val headersTableModel = DefaultTableModel(arrayOf("Key", "Value"), 0)
-    private val headersTable = JBTable(headersTableModel)
-
-    // Body & Response
-    private val bodyTypeCombo = ComboBox(arrayOf("none", "raw (json)"))
-    private val bodyEditor = LanguageTextField(JsonLanguage.INSTANCE, project, "", false)
-    private val responseEditor = LanguageTextField(JsonLanguage.INSTANCE, project, "", true).apply { isViewer = true }
-
-    // 状态栏
-    private val statusLabel = JBLabel(" Ready", AllIcons.General.Balloon, SwingConstants.LEFT).apply {
-        foreground = JBUI.CurrentTheme.ContextHelp.FOREGROUND
-    }
-    private val timeLabel = JBLabel()
-
     private val objectMapper = ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT)
 
-    init {
-        refreshEnvComboBox() // 虽然里面其实没逻辑了，但保留结构
+    private val addressBar = GeekAddressBar(project) { sendRequest() }
+    private val inputPanel = RequestInputPanel(project)
+    private val responsePanel = ResponsePanel(project)
 
+    init {
+        // [重要] 将 responsePanel 注册为当前面板的子 Disposable
+        // 这样当 RequestEditorPanel 被销毁时，responsePanel.dispose() 会自动被调用
+        Disposer.register(this, responsePanel)
+
+        // 1. Toolbar
         val toolbar = createTopToolbar()
         toolbar.targetComponent = this
         setToolbar(toolbar.component)
 
+        // 2. Layout
         val mainContent = JPanel(BorderLayout())
+
         val addressWrapper = JPanel(BorderLayout())
         addressWrapper.border = JBUI.Borders.empty(10, 10, 5, 10)
         addressWrapper.add(addressBar, BorderLayout.CENTER)
 
-        val paramsPanel = createTablePanel(paramsTable, paramsTableModel)
-        setupHeaderAutoCompletion()
-        val headersPanel = createTablePanel(headersTable, headersTableModel)
-        val authPanel = createAuthPanel()
-        val bodyPanel = createBodyPanel()
-        val responsePanel = createResponsePanel()
-
-        tabbedPane.addTab("Params", paramsPanel)
-        tabbedPane.addTab("Auth", authPanel)
-        tabbedPane.addTab("Headers", headersPanel)
-        tabbedPane.addTab("Body", bodyPanel)
-        tabbedPane.addTab("Response", responsePanel)
-
-        val statusBar = JPanel(BorderLayout())
-        statusBar.border = JBUI.Borders.empty(2, 5)
-        statusBar.background = JBUI.CurrentTheme.StatusBar.Widget.HOVER_BACKGROUND
-        statusBar.add(statusLabel, BorderLayout.WEST)
-        statusBar.add(timeLabel, BorderLayout.EAST)
+        val splitter = JBSplitter(true, 0.5f)
+        splitter.firstComponent = inputPanel
+        splitter.secondComponent = responsePanel
+        // 让分割线更明显一点，避免“格格不入”
+        splitter.dividerWidth = 2
 
         mainContent.add(addressWrapper, BorderLayout.NORTH)
-        mainContent.add(tabbedPane, BorderLayout.CENTER)
-        mainContent.add(statusBar, BorderLayout.SOUTH)
+        mainContent.add(splitter, BorderLayout.CENTER)
 
         setContent(mainContent)
     }
 
-    // ... createTopToolbar, createResponsePanel, createBodyPanel, createAuthPanel ...
-    // ... createTablePanel, setupHeaderAutoCompletion, setEditorText, resolveVariables, refreshEnvComboBox ...
-    // 为了节省篇幅，请确保保留这些辅助方法 (与上一版一致)
+    // [重要] 必须重写 dispose 方法，虽然 SimpleToolWindowPanel 甚至不需要显式重写，
+    // 但作为良好实践，声明在这里表示我们知道它会被调用。
+    override fun dispose() {
+        // 默认实现会处理 Disposer.register 的子组件
+    }
 
-    // ------------------------------------------------------------------------
-    // 仅贴出需要修改逻辑的方法：sendRequest
-    // ------------------------------------------------------------------------
+    // --- 下面的业务逻辑保持不变 (复制之前的即可) ---
+    // 为节省篇幅，这里省略 renderApi, sendRequest 等具体实现
+    // 请直接复用上一轮回复中 RequestEditorPanel 的 sendRequest, renderApi 等方法
+    // 逻辑完全一样，不需要修改。
+
+    // ... copy rest of the methods ...
 
     private fun createTopToolbar(): ActionToolbar {
         val actionGroup = DefaultActionGroup()
@@ -151,155 +101,117 @@ class RequestEditorPanel(
         return ActionManager.getInstance().createActionToolbar("RestClientTopToolbar", actionGroup, true)
     }
 
-    // ... (其他构建方法略，请从上一条回复复制) ...
-
-    private fun createResponsePanel(): JPanel {
-        val panel = JPanel(BorderLayout())
-        val actionGroup = DefaultActionGroup()
-        actionGroup.add(object : DumbAwareAction("Copy", "Copy response body", AllIcons.Actions.Copy) {
-            override fun actionPerformed(e: AnActionEvent) {
-                val text = responseEditor.text
-                if (text.isNotEmpty()) {
-                    CopyPasteManager.getInstance().setContents(StringSelection(text))
-                    JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("Copied!", MessageType.INFO, null).setFadeoutTime(1500).createBalloon().show(RelativePoint.getSouthEastOf(statusLabel), Balloon.Position.atRight)
-                }
-            }
-        })
-        actionGroup.add(object : DumbAwareAction("Export", "Export to file", AllIcons.Actions.MenuSaveall) {
-            override fun actionPerformed(e: AnActionEvent) {
-                val descriptor = FileSaverDescriptor("Export Response", "Save response body", "json", "txt")
-                val dialog = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)
-                val wrapper = dialog.save(null as VirtualFile?, "response.json")
-                if (wrapper != null) {
-                    try { wrapper.file.writeText(responseEditor.text); statusLabel.text = " Saved to ${wrapper.file.name}" }
-                    catch (ex: Exception) { statusLabel.text = " Export failed: ${ex.message}"; statusLabel.icon = AllIcons.General.Error }
-                }
-            }
-        })
-        val toolbar = ActionManager.getInstance().createActionToolbar("ResponseToolbar", actionGroup, true)
-        toolbar.targetComponent = responseEditor
-        val toolBarPanel = JPanel(BorderLayout())
-        toolBarPanel.border = JBUI.Borders.emptyBottom(2)
-        toolBarPanel.add(JLabel("Body:"), BorderLayout.WEST)
-        toolBarPanel.add(toolbar.component, BorderLayout.EAST)
-        panel.add(toolBarPanel, BorderLayout.NORTH)
-        panel.add(responseEditor, BorderLayout.CENTER)
-        return panel
+    fun createNewEmptyRequest() {
+        activeCollectionNode = null
+        addressBar.method = "GET"
+        addressBar.url = ""
+        inputPanel.clearAll()
+        responsePanel.clear()
     }
 
-    private fun createBodyPanel(): JPanel {
-        val panel = JPanel(BorderLayout())
-        val top = JPanel(FlowLayout(FlowLayout.LEFT))
-        top.add(JLabel("Content-Type:"))
-        top.add(bodyTypeCombo)
-        bodyTypeCombo.addActionListener {
-            val type = bodyTypeCombo.selectedItem as String
-            bodyEditor.isEnabled = type != "none"
-            if (type == "none") setEditorText(bodyEditor, "")
+    // 复用之前的 renderApi, renderSavedRequest, updateExistingRequest, createNewRequestFlow
+    // 复用之前的 sendRequest, resolveVariables, formatJson
+    // 注意：sendRequest 里调用 responsePanel.updateResponse(finalResponse)
+
+    // 为了完整性，这里贴一下最关键的 sendRequest
+    private fun sendRequest() {
+        var finalUrl = resolveVariables(addressBar.url)
+        val method = addressBar.method
+        val finalBody = resolveVariables(inputPanel.getBody())
+
+        val params = inputPanel.getQueryParams()
+        val queryParamsBuilder = StringBuilder()
+        params.forEach {
+            val v = resolveVariables(it.value)
+            if (queryParamsBuilder.isEmpty()) queryParamsBuilder.append("?") else queryParamsBuilder.append("&")
+            queryParamsBuilder.append("${it.name}=$v")
         }
-        panel.add(top, BorderLayout.NORTH)
-        panel.add(bodyEditor, BorderLayout.CENTER)
-        return panel
-    }
 
-    private fun createAuthPanel(): JPanel {
-        val cardPanel = JPanel(CardLayout())
-        val noAuth = JPanel()
-        val bearer = panel { row("Token:") { cell(bearerTokenField).align(AlignX.FILL) } }
-        val basic = panel { row("Username:") { cell(basicUserField).align(AlignX.FILL) }; row("Password:") { cell(basicPasswordField).align(AlignX.FILL) } }
-        cardPanel.add(noAuth, "No Auth")
-        cardPanel.add(bearer, "Bearer Token")
-        cardPanel.add(basic, "Basic Auth")
-        val main = JPanel(BorderLayout())
-        main.add(panel { row("Auth Type:") { cell(authTypeCombo) } }, BorderLayout.NORTH)
-        main.add(cardPanel, BorderLayout.CENTER)
-        authTypeCombo.addActionListener { (cardPanel.layout as CardLayout).show(cardPanel, authTypeCombo.selectedItem as String) }
-        return main
-    }
+        if (!finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += queryParamsBuilder.toString()
+        else if (finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += "&" + queryParamsBuilder.substring(1)
 
-    private fun createTablePanel(table: JBTable, model: DefaultTableModel): JPanel {
-        val decorator = ToolbarDecorator.createDecorator(table)
-            .setAddAction { model.addRow(arrayOf("", "")) }
-            .setRemoveAction { if (table.isEditing) table.cellEditor?.stopCellEditing(); if (table.selectedRow >= 0) model.removeRow(table.selectedRow) }
-        return decorator.createPanel()
-    }
-
-    private fun setupHeaderAutoCompletion() {
+        val headers = ArrayList<RestParam>()
         val headerStore = HeaderStore.getInstance(project)
-        val suggestions = headerStore.getAllSuggestions().toTypedArray()
-        val headerKeyEditor = DefaultCellEditor(ComboBox(suggestions).apply { isEditable = true })
-        headersTable.columnModel.getColumn(0).cellEditor = headerKeyEditor
-    }
 
-    private fun setEditorText(editor: LanguageTextField, text: String) {
-        ApplicationManager.getApplication().invokeLater { if (!project.isDisposed) WriteCommandAction.runWriteCommandAction(project) { editor.text = text } }
+        inputPanel.getHeaders().forEach {
+            val v = resolveVariables(it.value)
+            headers.add(RestParam(it.name, v, RestParam.ParamType.HEADER, "String"))
+            headerStore.recordHeader(it.name)
+        }
+
+        val (authType, authData) = inputPanel.getAuthData()
+        if (authType == "bearer") {
+            val token = resolveVariables(authData["token"])
+            if (!token.isNullOrBlank()) headers.add(RestParam("Authorization", "Bearer $token", RestParam.ParamType.HEADER, "String"))
+        } else if (authType == "basic") {
+            val user = resolveVariables(authData["username"])
+            val pass = resolveVariables(authData["password"])
+            if (!user.isNullOrBlank() || !pass.isNullOrBlank()) {
+                val encoded = Base64.getEncoder().encodeToString("$user:$pass".toByteArray())
+                headers.add(RestParam("Authorization", "Basic $encoded", RestParam.ParamType.HEADER, "String"))
+            }
+        }
+
+        addressBar.isBusy = true
+        responsePanel.clear()
+
+        ApplicationManager.getApplication().executeOnPooledThread {
+            val executor = HttpExecutor()
+            val response = executor.execute(method, finalUrl, finalBody, headers)
+            val prettyBody = formatJson(response.body)
+            val finalResponse = RestResponse(response.statusCode, prettyBody, response.headers, response.durationMs)
+
+            SwingUtilities.invokeLater {
+                addressBar.isBusy = false
+                responsePanel.updateResponse(finalResponse)
+            }
+        }
     }
 
     private fun resolveVariables(text: String?): String {
         if (text.isNullOrEmpty()) return ""
         val selectedEnv = EnvService.getInstance(project).selectedEnv ?: return text
         var result = text
-        for ((key, value) in selectedEnv.variables) { result = result?.replace("{{$key}}", value) }
+        for ((key, value) in selectedEnv.variables) {
+            result = result?.replace("{{$key}}", value)
+        }
         return result ?: ""
-    }
-
-    private fun refreshEnvComboBox() { } // 空实现
-
-    private fun getUniqueName(folder: CollectionNode, baseName: String): String {
-        var uniqueName = baseName
-        var counter = 1
-        val existingNames = folder.children.map { it.name }.toSet()
-        while (existingNames.contains(uniqueName)) { uniqueName = "$baseName ($counter)"; counter++ }
-        return uniqueName
     }
 
     private fun formatJson(json: String): String {
         if (json.isBlank()) return ""
-        return try { objectMapper.writeValueAsString(objectMapper.readTree(json)) } catch (e: Exception) { json }
+        return try {
+            objectMapper.writeValueAsString(objectMapper.readTree(json))
+        } catch (e: Exception) {
+            json
+        }
     }
-
-    fun createNewEmptyRequest() {
-        activeCollectionNode = null
-        addressBar.method = "GET"
-        addressBar.url = ""
-        paramsTableModel.rowCount = 0; paramsTableModel.addRow(arrayOf("", ""))
-        headersTableModel.rowCount = 0; headersTableModel.addRow(arrayOf("", ""))
-        bodyTypeCombo.selectedItem = "none"
-        setEditorText(bodyEditor, "")
-        authTypeCombo.selectedItem = "No Auth"
-        bearerTokenField.text = ""
-        basicUserField.text = ""
-        basicPasswordField.text = ""
-        setEditorText(responseEditor, "")
-        statusLabel.text = " New Request"
-        statusLabel.icon = AllIcons.General.Add
-        timeLabel.text = ""
-        tabbedPane.selectedIndex = 0
-    }
+    // ... 补充其他缺失的方法 (renderApi 等) 与上一次回答一致 ...
+    // [补充] 必须补充上 renderApi 等方法，否则会编译错误。
+    // 请参考上一轮回答的 RequestEditorPanel 代码将剩余方法补全。
+    // 关键点在于 init 里的 Disposer.register(this, responsePanel)
 
     fun renderApi(api: ApiDefinition) {
         activeCollectionNode = null
         addressBar.method = api.method.uppercase()
-        addressBar.url = "http://localhost:8080" + api.url
-        paramsTableModel.rowCount = 0
-        headersTableModel.rowCount = 0
-        setEditorText(bodyEditor, "")
-        bodyTypeCombo.selectedItem = "none"
-        authTypeCombo.selectedItem = "No Auth"
-        for (param in api.params) {
+        var url = "http://localhost:8080" + api.url
+
+        val params = ArrayList<RestParam>()
+        val headers = ArrayList<RestParam>()
+        var body = ""
+
+        api.params.forEach { param ->
             when (param.type) {
-                RestParam.ParamType.PATH -> addressBar.url = addressBar.url.replace("{${param.name}}", param.value)
-                RestParam.ParamType.QUERY -> paramsTableModel.addRow(arrayOf(param.name, param.value))
-                RestParam.ParamType.HEADER -> headersTableModel.addRow(arrayOf(param.name, param.value))
-                RestParam.ParamType.BODY -> {
-                    bodyTypeCombo.selectedItem = "raw (json)"
-                    setEditorText(bodyEditor, param.value.ifEmpty { "{}" })
-                    if (api.method.uppercase() in listOf("POST", "PUT")) tabbedPane.selectedIndex = 3
-                }
+                RestParam.ParamType.PATH -> url = url.replace("{${param.name}}", param.value)
+                RestParam.ParamType.QUERY -> params.add(param)
+                RestParam.ParamType.HEADER -> headers.add(param)
+                RestParam.ParamType.BODY -> body = param.value.ifEmpty { "{}" }
             }
         }
-        statusLabel.text = " Unsaved API"
-        statusLabel.icon = AllIcons.FileTypes.Java
+        addressBar.url = url
+        inputPanel.loadRequestData(params, headers, body, "noauth", mapOf())
+        if (api.method.uppercase() in listOf("POST", "PUT")) inputPanel.selectedIndex = 3 else inputPanel.selectedIndex = 0
+        responsePanel.clear()
     }
 
     fun renderSavedRequest(node: CollectionNode) {
@@ -307,48 +219,19 @@ class RequestEditorPanel(
         val req = node.request ?: return
         addressBar.method = req.method.uppercase()
         addressBar.url = req.url
-        paramsTableModel.rowCount = 0
-        req.params.forEach { paramsTableModel.addRow(arrayOf(it.name, it.value)) }
-        headersTableModel.rowCount = 0
-        req.headers.forEach { headersTableModel.addRow(arrayOf(it.name, it.value)) }
-        val content = req.bodyContent ?: ""
-        setEditorText(bodyEditor, content)
-        bodyTypeCombo.selectedItem = if (content.isEmpty()) "none" else "raw (json)"
-        val typeStr = when (req.authType) { "bearer" -> "Bearer Token"; "basic" -> "Basic Auth"; else -> "No Auth" }
-        authTypeCombo.selectedItem = typeStr
-        bearerTokenField.text = req.authContent["token"] ?: ""
-        basicUserField.text = req.authContent["username"] ?: ""
-        basicPasswordField.text = req.authContent["password"] ?: ""
-        tabbedPane.selectedIndex = 0
-        setEditorText(responseEditor, "")
-        statusLabel.text = " Editing: ${node.name}"
-        statusLabel.icon = AllIcons.Actions.Edit
+        inputPanel.loadRequestData(req.params, req.headers, req.bodyContent, req.authType, req.authContent)
+        responsePanel.clear()
     }
 
     private fun collectData(targetReq: SavedRequest) {
         targetReq.method = addressBar.method
         targetReq.url = addressBar.url
-        targetReq.bodyContent = if (bodyTypeCombo.selectedItem == "none") null else bodyEditor.text
-        val params = ArrayList<RestParam>()
-        for (i in 0 until paramsTableModel.rowCount) {
-            val k = paramsTableModel.getValueAt(i, 0) as String
-            val v = paramsTableModel.getValueAt(i, 1) as String
-            if (k.isNotBlank()) params.add(RestParam(k, v, RestParam.ParamType.QUERY, "String"))
-        }
-        targetReq.params = params
-        val headers = ArrayList<RestParam>()
-        for (i in 0 until headersTableModel.rowCount) {
-            val k = headersTableModel.getValueAt(i, 0) as String
-            val v = headersTableModel.getValueAt(i, 1) as String
-            if (k.isNotBlank()) headers.add(RestParam(k, v, RestParam.ParamType.HEADER, "String"))
-        }
-        targetReq.headers = headers
-        val authType = authTypeCombo.selectedItem as String
-        targetReq.authType = when (authType) { "Bearer Token" -> "bearer"; "Basic Auth" -> "basic"; else -> "noauth" }
-        val authMap = HashMap<String, String>()
-        if (targetReq.authType == "bearer") authMap["token"] = bearerTokenField.text
-        if (targetReq.authType == "basic") { authMap["username"] = basicUserField.text; authMap["password"] = String(basicPasswordField.password) }
-        targetReq.authContent = authMap
+        targetReq.bodyContent = inputPanel.getBody()
+        targetReq.params = inputPanel.getQueryParams()
+        targetReq.headers = inputPanel.getHeaders()
+        val (authType, authContent) = inputPanel.getAuthData()
+        targetReq.authType = authType
+        targetReq.authContent = authContent
     }
 
     private fun updateExistingRequest() {
@@ -357,8 +240,6 @@ class RequestEditorPanel(
         collectData(req)
         node.request = req
         onSaveSuccess()
-        statusLabel.text = " Saved: ${node.name}"
-        statusLabel.icon = AllIcons.Actions.MenuSaveall
     }
 
     private fun createNewRequestFlow() {
@@ -374,83 +255,14 @@ class RequestEditorPanel(
             targetFolder.addChild(newNode)
             activeCollectionNode = newNode
             onSaveSuccess()
-            statusLabel.text = " Saved: $uniqueName"
-            statusLabel.icon = AllIcons.Actions.MenuSaveall
         }
     }
 
-    private fun sendRequest() {
-        if (headersTable.isEditing) headersTable.cellEditor.stopCellEditing()
-        if (paramsTable.isEditing) paramsTable.cellEditor.stopCellEditing()
-
-        var finalUrl = resolveVariables(addressBar.url)
-        val method = addressBar.method
-        val finalBody = resolveVariables(if (bodyTypeCombo.selectedItem == "none") null else bodyEditor.text)
-
-        val queryParams = StringBuilder()
-        for (i in 0 until paramsTableModel.rowCount) {
-            val key = paramsTableModel.getValueAt(i, 0) as String
-            val valResolved = resolveVariables(paramsTableModel.getValueAt(i, 1) as String)
-            if (key.isNotBlank()) {
-                if (queryParams.isEmpty()) queryParams.append("?") else queryParams.append("&")
-                queryParams.append("$key=$valResolved")
-            }
-        }
-        if (!finalUrl.contains("?") && queryParams.isNotEmpty()) finalUrl += queryParams.toString()
-        else if (finalUrl.contains("?") && queryParams.isNotEmpty()) finalUrl += "&" + queryParams.substring(1)
-
-        val headers = ArrayList<RestParam>()
-        val headerStore = HeaderStore.getInstance(project)
-        for (i in 0 until headersTableModel.rowCount) {
-            val key = headersTableModel.getValueAt(i, 0) as String
-            val valResolved = resolveVariables(headersTableModel.getValueAt(i, 1) as String)
-            if (key.isNotBlank()) {
-                headers.add(RestParam(key, valResolved, RestParam.ParamType.HEADER, "String"))
-                headerStore.recordHeader(key)
-            }
-        }
-
-        val authType = authTypeCombo.selectedItem as String
-        if (authType == "Bearer Token") {
-            val token = resolveVariables(bearerTokenField.text)
-            if (token.isNotBlank()) headers.add(RestParam("Authorization", "Bearer $token", RestParam.ParamType.HEADER, "String"))
-        } else if (authType == "Basic Auth") {
-            val user = resolveVariables(basicUserField.text)
-            val pass = resolveVariables(String(basicPasswordField.password))
-            if (user.isNotBlank() || pass.isNotBlank()) {
-                val encoded = Base64.getEncoder().encodeToString("$user:$pass".toByteArray())
-                headers.add(RestParam("Authorization", "Basic $encoded", RestParam.ParamType.HEADER, "String"))
-            }
-        }
-
-        // [修复] 使用 addressBar.isBusy 控制状态
-        addressBar.isBusy = true
-        statusLabel.text = " Sending..."
-        statusLabel.icon = AllIcons.Process.Step_1
-        timeLabel.text = ""
-        setEditorText(responseEditor, "")
-        tabbedPane.selectedIndex = 4
-
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val executor = HttpExecutor()
-            val response = executor.execute(method, finalUrl, finalBody, headers)
-
-            SwingUtilities.invokeLater {
-                // [修复] 恢复状态
-                addressBar.isBusy = false
-
-                val prettyBody = formatJson(response.body)
-                statusLabel.text = " Status: ${response.statusCode} ${if(response.statusCode==200) "OK" else ""}"
-                timeLabel.text = "Time: ${response.durationMs}ms  "
-                if (response.statusCode in 200..299) {
-                    statusLabel.icon = AllIcons.RunConfigurations.TestState.Green2
-                    statusLabel.foreground = Color(54, 150, 70)
-                } else {
-                    statusLabel.icon = AllIcons.RunConfigurations.TestState.Red2
-                    statusLabel.foreground = Color(200, 50, 50)
-                }
-                setEditorText(responseEditor, prettyBody)
-            }
-        }
+    private fun getUniqueName(folder: CollectionNode, baseName: String): String {
+        var uniqueName = baseName
+        var counter = 1
+        val existingNames = folder.children.map { it.name }.toSet()
+        while (existingNames.contains(uniqueName)) { uniqueName = "$baseName ($counter)"; counter++ }
+        return uniqueName
     }
 }
