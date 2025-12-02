@@ -37,7 +37,6 @@ class RequestEditorPanel(
     private val responsePanel = ResponsePanel(project)
 
     init {
-        // [Lifecycle] 注册子组件的生命周期
         Disposer.register(this, responsePanel)
 
         // 1. Toolbar
@@ -62,39 +61,29 @@ class RequestEditorPanel(
 
         setContent(mainContent)
 
-        // [Shortcut] 注册 "Ctrl + Enter" (Mac: Cmd + Enter) 发送请求
+        // [Shortcut] 注册 Ctrl+Enter
         val sendAction = object : DumbAwareAction() {
-            override fun actionPerformed(e: AnActionEvent) {
-                sendRequest()
-            }
+            override fun actionPerformed(e: AnActionEvent) { sendRequest() }
         }
-        // 将快捷键注册到当前 Panel 上
         sendAction.registerCustomShortcutSet(CommonShortcuts.getCtrlEnter(), this)
     }
 
-    override fun dispose() {
-        // 资源释放由 Disposer 自动处理
-    }
+    override fun dispose() {}
 
     private fun createTopToolbar(): ActionToolbar {
         val actionGroup = DefaultActionGroup()
         actionGroup.add(EnvironmentComboAction(project) {})
         actionGroup.addSeparator()
 
-        // [Shortcut] Save Action
         val saveAction = object : DumbAwareAction("Save", "Save current request", AllIcons.Actions.MenuSaveall) {
             override fun actionPerformed(e: AnActionEvent) {
                 if (activeCollectionNode != null) updateExistingRequest() else createNewRequestFlow()
             }
         }
-
-        // [修复] CommonShortcuts 没有 getSave()。
-        // 我们从 ActionManager 获取 IDE 标准的 "SaveAll" Action，复用它的快捷键 (通常是 Ctrl+S 或 Cmd+S)
         val saveAllAction = ActionManager.getInstance().getAction("SaveAll")
         if (saveAllAction != null) {
             saveAction.registerCustomShortcutSet(saveAllAction.shortcutSet, this)
         }
-
         actionGroup.add(saveAction)
 
         actionGroup.add(object : DumbAwareAction("Save As...", "Save as new request", AllIcons.Actions.MenuPaste) {
@@ -135,6 +124,8 @@ class RequestEditorPanel(
             }
         }
         addressBar.url = url
+        // 默认类型 raw (json)
+        inputPanel.setBodyType("raw (json)")
         inputPanel.loadRequestData(params, headers, body, "noauth", mapOf())
         if (api.method.uppercase() in listOf("POST", "PUT")) inputPanel.selectedIndex = 3 else inputPanel.selectedIndex = 0
         responsePanel.clear()
@@ -145,6 +136,13 @@ class RequestEditorPanel(
         val req = node.request ?: return
         addressBar.method = req.method.uppercase()
         addressBar.url = req.url
+
+        // [新增] 恢复 Body Type (如果 SavedRequest 有这个字段最好，没有则根据 bodyType 属性或者默认)
+        // 假设 SavedRequest 有 bodyType 属性 (你上传的代码里有: @Attribute("bodyType") private String bodyType;)
+        // 如果为空，默认为 raw (json)
+        val bType = if (req.bodyType.isNullOrBlank()) "raw (json)" else req.bodyType
+        inputPanel.setBodyType(bType)
+
         inputPanel.loadRequestData(req.params, req.headers, req.bodyContent, req.authType, req.authContent)
         responsePanel.clear()
     }
@@ -152,7 +150,11 @@ class RequestEditorPanel(
     private fun collectData(targetReq: SavedRequest) {
         targetReq.method = addressBar.method
         targetReq.url = addressBar.url
+
+        // [新增] 保存 Body 类型
+        targetReq.bodyType = inputPanel.getBodyType()
         targetReq.bodyContent = inputPanel.getBody()
+
         targetReq.params = inputPanel.getQueryParams()
         targetReq.headers = inputPanel.getHeaders()
         val (authType, authContent) = inputPanel.getAuthData()
@@ -193,12 +195,12 @@ class RequestEditorPanel(
     }
 
     private fun sendRequest() {
-        // [防抖] 防止重复点击或快捷键连击
         if (addressBar.isBusy) return
 
         var finalUrl = resolveVariables(addressBar.url)
         val method = addressBar.method
         val finalBody = resolveVariables(inputPanel.getBody())
+        val bodyType = inputPanel.getBodyType()
 
         val params = inputPanel.getQueryParams()
         val queryParamsBuilder = StringBuilder()
@@ -207,9 +209,6 @@ class RequestEditorPanel(
             if (queryParamsBuilder.isEmpty()) queryParamsBuilder.append("?") else queryParamsBuilder.append("&")
             queryParamsBuilder.append("${it.name}=$v")
         }
-
-        if (!finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += queryParamsBuilder.toString()
-        else if (finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += "&" + queryParamsBuilder.substring(1)
 
         val headers = ArrayList<RestParam>()
         val headerStore = HeaderStore.getInstance(project)
@@ -220,6 +219,7 @@ class RequestEditorPanel(
             headerStore.recordHeader(it.name)
         }
 
+        // --- [新增] Auth 逻辑处理 ---
         val (authType, authData) = inputPanel.getAuthData()
         if (authType == "bearer") {
             val token = resolveVariables(authData["token"])
@@ -231,6 +231,36 @@ class RequestEditorPanel(
                 val encoded = Base64.getEncoder().encodeToString("$user:$pass".toByteArray())
                 headers.add(RestParam("Authorization", "Basic $encoded", RestParam.ParamType.HEADER, "String"))
             }
+        } else if (authType == "apikey") {
+            // [API Key] 支持 Header 和 Query
+            val key = resolveVariables(authData["key"])
+            val value = resolveVariables(authData["value"])
+            val where = authData["where"] ?: "Header"
+
+            if (!key.isNullOrBlank()) {
+                if (where == "Header") {
+                    headers.add(RestParam(key, value, RestParam.ParamType.HEADER, "String"))
+                } else {
+                    // 添加到 Query Params
+                    if (queryParamsBuilder.isEmpty()) queryParamsBuilder.append("?") else queryParamsBuilder.append("&")
+                    queryParamsBuilder.append("$key=$value")
+                }
+            }
+        }
+
+        // 拼接 URL
+        if (!finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += queryParamsBuilder.toString()
+        else if (finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += "&" + queryParamsBuilder.substring(1)
+
+        // --- [新增] Content-Type 自动补全 ---
+        val hasContentType = headers.any { it.name.equals("Content-Type", ignoreCase = true) }
+        if (!hasContentType) {
+            when (bodyType) {
+                "x-www-form-urlencoded" -> headers.add(RestParam("Content-Type", "application/x-www-form-urlencoded", RestParam.ParamType.HEADER, "String"))
+                "raw (json)" -> headers.add(RestParam("Content-Type", "application/json", RestParam.ParamType.HEADER, "String"))
+                "raw (xml)" -> headers.add(RestParam("Content-Type", "application/xml", RestParam.ParamType.HEADER, "String"))
+                "raw (text)" -> headers.add(RestParam("Content-Type", "text/plain", RestParam.ParamType.HEADER, "String"))
+            }
         }
 
         addressBar.isBusy = true
@@ -240,8 +270,13 @@ class RequestEditorPanel(
             val executor = HttpExecutor()
             val response = executor.execute(method, finalUrl, finalBody, headers)
 
-            // 格式化 JSON
-            val prettyBody = formatJson(response.body)
+            // 只有 JSON 尝试格式化，XML/HTML 暂不处理
+            val prettyBody = if (response.body.trim().startsWith("{") || response.body.trim().startsWith("[")) {
+                formatJson(response.body)
+            } else {
+                response.body
+            }
+
             val finalResponse = RestResponse(response.statusCode, prettyBody, response.headers, response.durationMs)
 
             SwingUtilities.invokeLater {

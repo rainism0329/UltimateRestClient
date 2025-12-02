@@ -72,6 +72,14 @@ public class SavedRequest {
     public Map<String, String> getAuthContent() { return authContent; }
     public void setAuthContent(Map<String, String> authContent) { this.authContent = authContent; }
 
+    public String getBodyType() {
+        return bodyType;
+    }
+
+    public void setBodyType(String bodyType) {
+        this.bodyType = bodyType;
+    }
+
     @Override
     public String toString() { return name; }
 }

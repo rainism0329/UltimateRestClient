@@ -1,22 +1,26 @@
 package com.phil.rest.ui
 
-import com.intellij.json.JsonLanguage
+import com.intellij.ide.highlighter.XmlFileType
+import com.intellij.json.JsonFileType
 import com.intellij.openapi.application.ApplicationManager
 import com.intellij.openapi.command.WriteCommandAction
+import com.intellij.openapi.fileTypes.PlainTextFileType
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.ComboBox
-import com.intellij.ui.LanguageTextField
+import com.intellij.ui.EditorTextField
 import com.intellij.ui.ToolbarDecorator
 import com.intellij.ui.components.JBTabbedPane
 import com.intellij.ui.dsl.builder.AlignX
 import com.intellij.ui.dsl.builder.panel
 import com.intellij.ui.table.JBTable
 import com.phil.rest.model.RestParam
-import com.phil.rest.model.SavedRequest
 import com.phil.rest.service.HeaderStore
 import java.awt.BorderLayout
 import java.awt.CardLayout
 import java.awt.FlowLayout
+import java.net.URLDecoder
+import java.net.URLEncoder
+import java.nio.charset.StandardCharsets
 import javax.swing.*
 import javax.swing.table.DefaultTableModel
 
@@ -31,14 +35,25 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
     private val headersTable = JBTable(headersTableModel)
 
     // --- Auth ---
-    private val authTypeCombo = ComboBox(arrayOf("No Auth", "Bearer Token", "Basic Auth"))
+    private val authTypeCombo = ComboBox(arrayOf("No Auth", "Bearer Token", "Basic Auth", "API Key"))
     private val bearerTokenField = JTextField()
     private val basicUserField = JTextField()
     private val basicPasswordField = JPasswordField()
+    // [新增] API Key 组件
+    private val apiKeyKeyField = JTextField()
+    private val apiKeyValueField = JTextField()
+    private val apiKeyLocationCombo = ComboBox(arrayOf("Header", "Query Params"))
 
     // --- Body ---
-    private val bodyTypeCombo = ComboBox(arrayOf("none", "raw (json)"))
-    private val bodyEditor = LanguageTextField(JsonLanguage.INSTANCE, project, "", false)
+    // [新增] 支持更多 Body 类型
+    private val bodyTypeCombo = ComboBox(arrayOf("none", "raw (json)", "raw (text)", "raw (xml)", "x-www-form-urlencoded"))
+    // 使用 EditorTextField 以支持动态切换 FileType (JSON/XML/Text)
+    private val bodyEditor = EditorTextField("", project, JsonFileType.INSTANCE)
+
+    // [新增] Form Data 表格
+    private val formTableModel = DefaultTableModel(arrayOf("Key", "Value"), 0)
+    private val formTable = JBTable(formTableModel)
+    private val bodyCardPanel = JPanel(CardLayout()) // 用于切换 Editor 和 Table
 
     init {
         // 1. Params Tab
@@ -55,26 +70,62 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         addTab("Body", createBodyPanel())
     }
 
-    // --- 对外暴露的数据获取/设置方法 ---
+    // --- 数据获取 ---
 
     fun getQueryParams(): List<RestParam> = getTableData(paramsTableModel, RestParam.ParamType.QUERY)
     fun getHeaders(): List<RestParam> = getTableData(headersTableModel, RestParam.ParamType.HEADER)
 
-    fun getBody(): String? = if (bodyTypeCombo.selectedItem == "none") null else bodyEditor.text
+    fun getBody(): String? {
+        val type = bodyTypeCombo.selectedItem as String
+        if (type == "none") return null
+
+        // [新增] 如果是 form-urlencoded，将表格转换为 k=v&k=v 字符串
+        if (type == "x-www-form-urlencoded") {
+            val sb = StringBuilder()
+            for (i in 0 until formTableModel.rowCount) {
+                val k = formTableModel.getValueAt(i, 0) as String
+                val v = formTableModel.getValueAt(i, 1) as String
+                if (k.isNotBlank()) {
+                    if (sb.isNotEmpty()) sb.append("&")
+                    // 注意：这里需要 URL 编码
+                    sb.append(URLEncoder.encode(k, StandardCharsets.UTF_8))
+                        .append("=")
+                        .append(URLEncoder.encode(v, StandardCharsets.UTF_8))
+                }
+            }
+            return sb.toString()
+        }
+
+        return bodyEditor.text
+    }
+
+    // 获取 Body 类型，方便 EditorPanel 设置 Content-Type
+    fun getBodyType(): String = bodyTypeCombo.selectedItem as String
 
     fun getAuthData(): Pair<String, Map<String, String>> {
         val typeStr = authTypeCombo.selectedItem as String
-        val typeCode = when (typeStr) { "Bearer Token" -> "bearer"; "Basic Auth" -> "basic"; else -> "noauth" }
+        val typeCode = when (typeStr) {
+            "Bearer Token" -> "bearer"
+            "Basic Auth" -> "basic"
+            "API Key" -> "apikey"
+            else -> "noauth"
+        }
         val map = HashMap<String, String>()
         if (typeCode == "bearer") map["token"] = bearerTokenField.text
         if (typeCode == "basic") {
             map["username"] = basicUserField.text
             map["password"] = String(basicPasswordField.password)
         }
+        if (typeCode == "apikey") {
+            map["key"] = apiKeyKeyField.text
+            map["value"] = apiKeyValueField.text
+            map["where"] = apiKeyLocationCombo.selectedItem as String
+        }
         return typeCode to map
     }
 
-    // 设置数据（用于加载保存的请求或渲染API）
+    // --- 数据加载 ---
+
     fun loadRequestData(params: List<RestParam>, headers: List<RestParam>, body: String?, authType: String, authContent: Map<String, String>) {
         // Params
         paramsTableModel.rowCount = 0
@@ -87,30 +138,72 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         if (headersTableModel.rowCount == 0) headersTableModel.addRow(arrayOf("", ""))
 
         // Body
-        setEditorText(bodyEditor, body ?: "")
-        bodyTypeCombo.selectedItem = if (body.isNullOrEmpty()) "none" else "raw (json)"
+        // [新增] 智能判断 Body 类型并恢复 UI 状态
+        // 这里我们简单根据内容判断，或者你应该在 SavedRequest 里存储 bodyType 字段
+        // 假设外部传入时已经设置好了 bodyTypeCombo 的状态，或者我们在这里做一点推断
+        // 为了简单，我们依赖 loadRequestData 调用前，bodyTypeCombo 已经被设置（通常是在 EditorPanel 里根据 SavedRequest.bodyType 设置）
+        // 但更好的做法是 RequestEditorPanel 显式设置 combo，然后再调这里。
+        // 这里我们只负责填数据。
+
+        val currentType = bodyTypeCombo.selectedItem as String
+        if (currentType == "x-www-form-urlencoded" && body != null) {
+            // 解析 k=v&k=v -> Table
+            formTableModel.rowCount = 0
+            body.split("&").forEach { pair ->
+                val parts = pair.split("=")
+                if (parts.size == 2) {
+                    try {
+                        val k = URLDecoder.decode(parts[0], StandardCharsets.UTF_8)
+                        val v = URLDecoder.decode(parts[1], StandardCharsets.UTF_8)
+                        formTableModel.addRow(arrayOf(k, v))
+                    } catch (e: Exception) { /* ignore */ }
+                }
+            }
+            if (formTableModel.rowCount == 0) formTableModel.addRow(arrayOf("", ""))
+        } else {
+            setEditorText(bodyEditor, body ?: "")
+        }
 
         // Auth
-        val typeStr = when (authType) { "bearer" -> "Bearer Token"; "basic" -> "Basic Auth"; else -> "No Auth" }
+        val typeStr = when (authType) {
+            "bearer" -> "Bearer Token"
+            "basic" -> "Basic Auth"
+            "apikey" -> "API Key"
+            else -> "No Auth"
+        }
         authTypeCombo.selectedItem = typeStr
         bearerTokenField.text = authContent["token"] ?: ""
         basicUserField.text = authContent["username"] ?: ""
         basicPasswordField.text = authContent["password"] ?: ""
+
+        apiKeyKeyField.text = authContent["key"] ?: ""
+        apiKeyValueField.text = authContent["value"] ?: ""
+        apiKeyLocationCombo.selectedItem = authContent["where"] ?: "Header"
+    }
+
+    fun setBodyType(type: String) {
+        bodyTypeCombo.selectedItem = type
     }
 
     fun clearAll() {
         paramsTableModel.rowCount = 0; paramsTableModel.addRow(arrayOf("", ""))
         headersTableModel.rowCount = 0; headersTableModel.addRow(arrayOf("", ""))
+        formTableModel.rowCount = 0; formTableModel.addRow(arrayOf("", ""))
+
         setEditorText(bodyEditor, "")
         bodyTypeCombo.selectedItem = "none"
+
         authTypeCombo.selectedItem = "No Auth"
         bearerTokenField.text = ""
         basicUserField.text = ""
         basicPasswordField.text = ""
+        apiKeyKeyField.text = ""
+        apiKeyValueField.text = ""
+
         selectedIndex = 0
     }
 
-    // --- 内部 UI 构建辅助方法 (基本照搬原有逻辑，稍微精简) ---
+    // --- UI 构建 ---
 
     private fun createTablePanel(table: JBTable, model: DefaultTableModel): JPanel {
         val decorator = ToolbarDecorator.createDecorator(table)
@@ -127,25 +220,69 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         val top = JPanel(FlowLayout(FlowLayout.LEFT))
         top.add(JLabel("Content-Type:"))
         top.add(bodyTypeCombo)
+
+        // Form Table Panel
+        val formPanel = createTablePanel(formTable, formTableModel)
+
+        // Editor Panel
+        val editorPanel = bodyEditor
+
+        bodyCardPanel.add(editorPanel, "editor")
+        bodyCardPanel.add(formPanel, "form")
+
+        // 监听类型切换
         bodyTypeCombo.addActionListener {
             val type = bodyTypeCombo.selectedItem as String
-            bodyEditor.isEnabled = type != "none"
-            if (type == "none") setEditorText(bodyEditor, "")
+
+            // 1. 切换 CardLayout (Table vs Editor)
+            val layout = bodyCardPanel.layout as CardLayout
+            if (type == "x-www-form-urlencoded") {
+                layout.show(bodyCardPanel, "form")
+            } else {
+                layout.show(bodyCardPanel, "editor")
+                // 2. 切换 Editor 高亮语言
+                when (type) {
+                    "raw (json)" -> bodyEditor.setFileType(JsonFileType.INSTANCE)
+                    "raw (xml)" -> bodyEditor.setFileType(XmlFileType.INSTANCE)
+                    "raw (text)" -> bodyEditor.setFileType(PlainTextFileType.INSTANCE)
+                }
+            }
+
+            // 3. 启用/禁用
+            val isNone = type == "none"
+            bodyEditor.isEnabled = !isNone
+            formTable.isEnabled = !isNone
+            if (isNone) setEditorText(bodyEditor, "")
         }
+
         panel.add(top, BorderLayout.NORTH)
-        panel.add(bodyEditor, BorderLayout.CENTER)
+        panel.add(bodyCardPanel, BorderLayout.CENTER)
         return panel
     }
 
     private fun createAuthPanel(): JPanel {
         val cardPanel = JPanel(CardLayout())
-        val noAuth = JPanel()
-        val bearer = panel { row("Token:") { cell(bearerTokenField).align(AlignX.FILL) } }
-        val basic = panel { row("Username:") { cell(basicUserField).align(AlignX.FILL) }; row("Password:") { cell(basicPasswordField).align(AlignX.FILL) } }
 
-        cardPanel.add(noAuth, "No Auth")
-        cardPanel.add(bearer, "Bearer Token")
-        cardPanel.add(basic, "Basic Auth")
+        // No Auth
+        cardPanel.add(JPanel(), "No Auth")
+
+        // Bearer
+        cardPanel.add(panel {
+            row("Token:") { cell(bearerTokenField).align(AlignX.FILL) }
+        }, "Bearer Token")
+
+        // Basic
+        cardPanel.add(panel {
+            row("Username:") { cell(basicUserField).align(AlignX.FILL) }
+            row("Password:") { cell(basicPasswordField).align(AlignX.FILL) }
+        }, "Basic Auth")
+
+        // [新增] API Key
+        cardPanel.add(panel {
+            row("Key:") { cell(apiKeyKeyField).align(AlignX.FILL) }
+            row("Value:") { cell(apiKeyValueField).align(AlignX.FILL) }
+            row("Add To:") { cell(apiKeyLocationCombo) }
+        }, "API Key")
 
         val main = JPanel(BorderLayout())
         main.add(panel { row("Auth Type:") { cell(authTypeCombo) } }, BorderLayout.NORTH)
@@ -172,7 +309,7 @@ class RequestInputPanel(private val project: Project) : JBTabbedPane() {
         return list
     }
 
-    private fun setEditorText(editor: LanguageTextField, text: String) {
+    private fun setEditorText(editor: EditorTextField, text: String) {
         ApplicationManager.getApplication().invokeLater {
             if (!project.isDisposed) WriteCommandAction.runWriteCommandAction(project) { editor.text = text }
         }
