@@ -18,20 +18,56 @@ import javax.swing.*
 class GeekAddressBar(
     private val project: Project,
     private val onSend: () -> Unit,
-    // [新增] 导入 cURL 回调，返回 true 表示成功处理了 cURL
     private val onImportCurl: (String) -> Boolean
 ) : JPanel(BorderLayout()) {
 
     private var selectedMethod = "GET"
+
+    // [新增] 动画相关属性
+    private var progressWidth = 0
+    private var timer: Timer? = null
 
     var isBusy: Boolean = false
         set(value) {
             field = value
             sendBtn.repaint()
             sendBtn.cursor = if (value) Cursor.getDefaultCursor() else Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+
+            // [新增] 动画控制逻辑
+            if (value) {
+                // 开始请求：启动动画
+                progressWidth = 0
+                timer?.stop()
+                timer = Timer(10) {
+                    // 简单的缓动算法：越接近终点越慢，制造"还在努力加载"的感觉
+                    if (progressWidth < width) {
+                        val step = (width - progressWidth) / 40 + 1
+                        progressWidth += step
+                        repaint()
+                    }
+                }.apply { start() }
+            } else {
+                // 请求结束：停止动画并重置
+                timer?.stop()
+                progressWidth = 0
+                repaint()
+            }
         }
 
-    // 1. Method 组件 (保持不变)
+    // [新增] 绘制进度条 (覆盖在子组件之上)
+    override fun paintChildren(g: Graphics) {
+        super.paintChildren(g) // 先画子组件 (TextField, Button)
+
+        if (isBusy) {
+            val g2 = g as Graphics2D
+            // 使用当前 HTTP 方法的颜色（例如 GET 是蓝色，POST 是绿色），非常有整体感
+            g2.color = UIConstants.getMethodColor(selectedMethod)
+            // 在底部画一个 3 像素高的条
+            g2.fillRect(0, height - 3, progressWidth, 3)
+        }
+    }
+
+    // 1. Method 组件
     private val methodLabel = object : JLabel(selectedMethod) {
         private var isHover = false
         init {
@@ -68,7 +104,7 @@ class GeekAddressBar(
         isOpaque = false
         emptyText.text = "https://api.example.com/v1/..."
 
-        // [核心逻辑] 拦截粘贴事件
+        // 拦截粘贴事件以支持 cURL
         transferHandler = object : TransferHandler() {
             override fun importData(support: TransferSupport): Boolean {
                 if (canImport(support)) {
@@ -76,7 +112,6 @@ class GeekAddressBar(
                         val text = support.transferable.getTransferData(DataFlavor.stringFlavor) as String
                         // 尝试识别 cURL
                         if (text.trim().startsWith("curl", ignoreCase = true)) {
-                            // 调用回调，如果处理成功，则不再执行默认粘贴
                             if (onImportCurl(text)) {
                                 return true
                             }
@@ -85,7 +120,6 @@ class GeekAddressBar(
                         e.printStackTrace()
                     }
                 }
-                // 否则执行默认行为 (普通粘贴)
                 return super.importData(support)
             }
 
@@ -95,7 +129,7 @@ class GeekAddressBar(
         }
     }
 
-    // 3. Send 组件 (保持不变)
+    // 3. Send 组件
     private val sendBtn = object : JComponent() {
         private var isHover = false
         init {

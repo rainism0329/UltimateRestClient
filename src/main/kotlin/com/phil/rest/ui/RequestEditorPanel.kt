@@ -15,6 +15,7 @@ import com.intellij.openapi.ui.SimpleToolWindowPanel
 import com.intellij.openapi.ui.popup.Balloon
 import com.intellij.openapi.ui.popup.JBPopupFactory
 import com.intellij.openapi.util.Disposer
+import com.intellij.ui.JBColor
 import com.intellij.ui.JBSplitter
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.util.ui.JBUI
@@ -25,6 +26,7 @@ import com.phil.rest.ui.component.GeekAddressBar
 import java.awt.BorderLayout
 import java.awt.datatransfer.StringSelection
 import java.util.*
+import javax.swing.JComponent // [Fix] 确保引入 JComponent
 import javax.swing.JPanel
 import javax.swing.SwingUtilities
 
@@ -72,7 +74,49 @@ class RequestEditorPanel(
 
     private fun createTopToolbar(): ActionToolbar {
         val actionGroup = DefaultActionGroup()
+
+        // 1. 环境选择下拉框
         actionGroup.add(EnvironmentComboAction(project) {})
+
+        // [新增] 2. 环境变量透视眼
+        actionGroup.add(object : DumbAwareAction("View Variables", "Peek active environment variables", AllIcons.General.InspectionsEye) {
+            override fun actionPerformed(e: AnActionEvent) {
+                // [Fix] 这里的 component 必须强转为 JComponent，否则 RelativePoint 会报错
+                val component = e.inputEvent?.component as? JComponent ?: return
+
+                val env = EnvService.getInstance(project).selectedEnv
+
+                // Case A: 没选环境或环境为空
+                if (env == null || env.variables.isEmpty()) {
+                    JBPopupFactory.getInstance()
+                        .createHtmlTextBalloonBuilder("No active variables", MessageType.WARNING, null)
+                        .setFadeoutTime(2000)
+                        .createBalloon()
+                        .show(RelativePoint.getSouthOf(component), Balloon.Position.below)
+                    return
+                }
+
+                // Case B: 显示变量列表
+                val html = buildString {
+                    append("<html><table border='0' cellspacing='4'>")
+                    env.variables.forEach { (k, v) ->
+                        // 截断过长的值，避免气泡太大
+                        val displayValue = if (v.length > 60) v.substring(0, 60) + "..." else v
+                        // 使用 IDEA 风格配色 (紫色 Key, 绿色 Value)
+                        append("<tr><td><b><span style='color:#9876AA'>$k</span></b></td><td>&nbsp;=&nbsp;</td><td><span style='color:#6A8759'>$displayValue</span></td></tr>")
+                    }
+                    append("</table></html>")
+                }
+
+                JBPopupFactory.getInstance()
+                    .createHtmlTextBalloonBuilder(html, null, JBColor.PanelBackground, null)
+                    .setShadow(true)
+                    .setHideOnClickOutside(true)
+                    .setAnimationCycle(200)
+                    .createBalloon()
+                    .show(RelativePoint.getSouthOf(component), Balloon.Position.below)
+            }
+        })
 
         actionGroup.add(object : DumbAwareAction("Clear Cookies", "Clear all session cookies", AllIcons.Actions.GC) {
             override fun actionPerformed(e: AnActionEvent) {
@@ -198,7 +242,7 @@ class RequestEditorPanel(
         val (authType, authContent) = inputPanel.getAuthData()
         targetReq.authType = authType
         targetReq.authContent = authContent
-        targetReq.extractRules = inputPanel.getExtractRules() // [新增] 保存提取规则
+        targetReq.extractRules = inputPanel.getExtractRules()
     }
 
     private fun updateExistingRequest() {
@@ -239,7 +283,6 @@ class RequestEditorPanel(
         var finalUrl = resolveVariables(addressBar.url)
         val method = addressBar.method
         val finalBody = resolveVariables(inputPanel.getBody())
-        // [Multipart] 获取 multipart 参数
         val multipartParams = inputPanel.getMultipartParams()
 
         val params = inputPanel.getQueryParams()
@@ -288,7 +331,6 @@ class RequestEditorPanel(
         val hasContentType = headers.any { it.name.equals("Content-Type", ignoreCase = true) }
         if (!hasContentType) {
             val bodyType = inputPanel.getBodyType()
-            // 注意：multipart/form-data 不需要手动加 Header，HttpExecutor 会自动生成带 boundary 的 Header
             if (bodyType != "multipart/form-data") {
                 when (bodyType) {
                     "x-www-form-urlencoded" -> headers.add(RestParam("Content-Type", "application/x-www-form-urlencoded", RestParam.ParamType.HEADER, "String"))
@@ -304,7 +346,6 @@ class RequestEditorPanel(
 
         ApplicationManager.getApplication().executeOnPooledThread {
             val executor = HttpExecutor()
-            // [Multipart] 调用新的 execute 重载方法
             val response = executor.execute(method, finalUrl, finalBody, headers, multipartParams)
 
             val prettyBody = if (response.body.trim().startsWith("{") || response.body.trim().startsWith("[")) {

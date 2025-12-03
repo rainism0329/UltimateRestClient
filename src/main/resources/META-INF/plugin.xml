@@ -3,6 +3,8 @@
 
     <name>RestPilot - Smart Spring Boot Client</name>
 
+    <version>0.3.3</version>
+
     <vendor url="https://phil-zhang.netlify.app/" email="bigphil.zhang@qq.com">Phil Zhang</vendor>
 
     <description><![CDATA[
@@ -49,7 +51,7 @@
     ]]></description>
 
     <change-notes><![CDATA[
-    <h3>1.0.0 Initial Release</h3>
+    <h3>0.3.3 Initial Release</h3>
     <ul>
         <li>🎉 Initial release of RestPilot.</li>
         <li>Support Spring Boot annotation scanning.</li>
