@@ -12,17 +12,18 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
-import java.nio.charset.StandardCharsets; // [新增]
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
 import java.time.Duration;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
 
 public class HttpExecutor {
 
-    // ... (static block, cookieManager, createInsecureClient 保持不变) ...
     static {
         System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
     }
@@ -61,17 +62,29 @@ public class HttpExecutor {
         }
     }
 
-    public RestResponse execute(String method, String url, String body, List<RestParam> headers, List<RestParam> multipartParams) {
+    /**
+     * 异步执行 HTTP 请求，支持超时和取消
+     */
+    public CompletableFuture<RestResponse> executeAsync(
+            String method,
+            String url,
+            String body,
+            List<RestParam> headers,
+            List<RestParam> multipartParams,
+            long timeoutSeconds
+    ) {
         if (!url.startsWith("http")) url = "http://" + url;
+        long finalTimeout = timeoutSeconds <= 0 ? 60 : timeoutSeconds; // 默认 60s
 
         long startTime = System.currentTimeMillis();
+
         try {
             HttpRequest.Builder builder = HttpRequest.newBuilder()
                     .uri(URI.create(url))
-                    .timeout(Duration.ofSeconds(30));
+                    .timeout(Duration.ofSeconds(finalTimeout));
 
+            // --- Body 构建逻辑 ---
             HttpRequest.BodyPublisher bodyPublisher;
-
             if (multipartParams != null && !multipartParams.isEmpty()) {
                 MultipartBodyPublisher multipartBuilder = new MultipartBodyPublisher();
                 for (RestParam param : multipartParams) {
@@ -93,6 +106,7 @@ public class HttpExecutor {
                         : HttpRequest.BodyPublishers.noBody();
             }
 
+            // --- Header 构建逻辑 ---
             for (RestParam header : headers) {
                 if (header.getName() != null && !header.getName().isBlank()) {
                     if (multipartParams != null && !multipartParams.isEmpty() && "Content-Type".equalsIgnoreCase(header.getName())) {
@@ -113,24 +127,36 @@ public class HttpExecutor {
                 default: builder.method(method, bodyPublisher);
             }
 
-            // [核心修改] 使用 ofByteArray 读取原始字节
-            HttpResponse<byte[]> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
-            long duration = System.currentTimeMillis() - startTime;
-
-            byte[] rawBytes = response.body();
-            // 尝试将字节转为字符串 (默认为 UTF-8，这就足够应对 99% 的 JSON 场景)
-            String bodyString = new String(rawBytes, StandardCharsets.UTF_8);
-
-            return new RestResponse(response.statusCode(), bodyString, rawBytes, response.headers().map(), duration);
+            // --- 核心：异步发送 ---
+            return client.sendAsync(builder.build(), HttpResponse.BodyHandlers.ofByteArray())
+                    .thenApply(response -> {
+                        long duration = System.currentTimeMillis() - startTime;
+                        byte[] rawBytes = response.body();
+                        // 尝试转为 String 用于文本显示 (UTF-8)
+                        String bodyString = new String(rawBytes, StandardCharsets.UTF_8);
+                        return new RestResponse(response.statusCode(), bodyString, rawBytes, response.headers().map(), duration);
+                    })
+                    .orTimeout(finalTimeout, TimeUnit.SECONDS) // 异步超时控制
+                    .exceptionally(ex -> {
+                        long duration = System.currentTimeMillis() - startTime;
+                        String errorMsg = ex.getCause() != null ? ex.getCause().getMessage() : ex.getMessage();
+                        // 发生异常（超时或网络错误）返回一个状态码为0的响应
+                        return new RestResponse(0, "Error: " + errorMsg, new byte[0], Map.of(), duration);
+                    });
 
         } catch (Exception e) {
-            long duration = System.currentTimeMillis() - startTime;
-            // 错误时，rawBody 传空字节数组
-            return new RestResponse(0, "Request Failed: " + e.toString(), new byte[0], Map.of(), duration);
+            return CompletableFuture.completedFuture(
+                    new RestResponse(0, "Build Error: " + e.getMessage(), new byte[0], Map.of(), 0)
+            );
         }
     }
 
-    public RestResponse execute(String method, String url, String body, List<RestParam> headers) {
-        return execute(method, url, body, headers, null);
+    // 保留旧的同步方法以兼容（如果还有其他地方用到）
+    public RestResponse execute(String method, String url, String body, List<RestParam> headers, List<RestParam> multipartParams) {
+        try {
+            return executeAsync(method, url, body, headers, multipartParams, 30).get();
+        } catch (Exception e) {
+            return new RestResponse(0, "Error: " + e.getMessage(), new byte[0], Map.of(), 0);
+        }
     }
 }

@@ -8,18 +8,28 @@ import com.phil.rest.model.RestParam
 import com.phil.rest.model.RestResponse
 import com.phil.rest.model.SavedRequest
 import java.util.*
+import java.util.concurrent.CompletableFuture
 import javax.swing.SwingUtilities
 
 /**
  * 负责处理请求发送的业务逻辑：
  * 1. 变量替换
  * 2. Auth Header 生成
- * 3. 线程调度
+ * 3. 异步线程调度 & 取消控制
  * 4. JSON 格式化 & 变量提取
  */
 class RequestSender(private val project: Project) {
 
     private val objectMapper = ObjectMapper().enable(SerializationFeature.INDENT_OUTPUT)
+
+    // [新增] 持有当前运行的 Future，用于取消
+    private var currentFuture: CompletableFuture<RestResponse>? = null
+
+    // [新增] 取消当前请求
+    fun cancelCurrentRequest() {
+        currentFuture?.cancel(true)
+        currentFuture = null
+    }
 
     fun sendRequest(
         requestData: SavedRequest,        // 包含 URL, Method, Headers, Body, Auth 等
@@ -27,7 +37,7 @@ class RequestSender(private val project: Project) {
         onStart: () -> Unit,
         onFinish: (RestResponse) -> Unit
     ) {
-        // 1. 变量解析 (Context Preparation)
+        // 1. 变量解析
         var finalUrl = resolveVariables(requestData.url)
         val method = requestData.method
         val finalBody = resolveVariables(requestData.bodyContent)
@@ -44,14 +54,12 @@ class RequestSender(private val project: Project) {
         val headers = ArrayList<RestParam>()
         val headerStore = HeaderStore.getInstance(project)
 
-        // 添加常规 Header
         requestData.headers.forEach {
             val v = resolveVariables(it.value)
             headers.add(RestParam(it.name, v, RestParam.ParamType.HEADER, "String"))
-            headerStore.recordHeader(it.name) // 记录到自动补全
+            headerStore.recordHeader(it.name)
         }
 
-        // 处理 Auth (逻辑从 UI 移到这里)
         val authContent = requestData.authContent
         when (requestData.authType) {
             "bearer" -> {
@@ -80,11 +88,9 @@ class RequestSender(private val project: Project) {
             }
         }
 
-        // 拼接 URL Query
         if (!finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += queryParamsBuilder.toString()
         else if (finalUrl.contains("?") && queryParamsBuilder.isNotEmpty()) finalUrl += "&" + queryParamsBuilder.substring(1)
 
-        // 自动补充 Content-Type
         val hasContentType = headers.any { it.name.equals("Content-Type", ignoreCase = true) }
         if (!hasContentType) {
             val bodyType = requestData.bodyType
@@ -98,38 +104,42 @@ class RequestSender(private val project: Project) {
             }
         }
 
-        // 4. 执行请求 (Async)
+        // 4. 执行请求
         SwingUtilities.invokeLater { onStart() }
 
-        ApplicationManager.getApplication().executeOnPooledThread {
-            val executor = HttpExecutor()
-            // 执行网络请求
-            val response = executor.execute(method, finalUrl, finalBody, headers, multipartParams)
+        val executor = HttpExecutor()
+        val timeout = 60L // 默认 60s 超时
 
-            // 格式化 JSON Body (美化)
-            val prettyBody = if (response.body.trim().startsWith("{") || response.body.trim().startsWith("[")) {
-                formatJson(response.body)
-            } else {
-                response.body
-            }
+        // 调用异步方法
+        val future = executor.executeAsync(method, finalUrl, finalBody, headers, multipartParams, timeout)
+        currentFuture = future
 
-            // [修复] 这里传入 rawBody，解决了报错问题
-            val finalResponse = RestResponse(
-                response.statusCode,
-                prettyBody,
-                response.rawBody, // <--- 关键修复点
-                response.headers,
-                response.durationMs
-            )
+        future.whenComplete { response, _ ->
+            // 注意：如果被 cancel，response 可能是 null
+            val safeResponse = response ?: RestResponse(0, "Request Cancelled", ByteArray(0), emptyMap(), 0)
 
-            // 5. 执行变量提取
-            if (response.statusCode in 200..299) {
-                JsonExtractor.executeExtraction(response.body, requestData.extractRules, project)
-            }
+            // 后处理（JSON 美化、变量提取）放入后台线程，防止阻塞 UI
+            ApplicationManager.getApplication().executeOnPooledThread {
+                val prettyBody = if (safeResponse.body.trim().startsWith("{") || safeResponse.body.trim().startsWith("[")) {
+                    formatJson(safeResponse.body)
+                } else safeResponse.body
 
-            // 回调 UI
-            SwingUtilities.invokeLater {
-                onFinish(finalResponse)
+                val finalRes = RestResponse(
+                    safeResponse.statusCode,
+                    prettyBody,
+                    safeResponse.rawBody,
+                    safeResponse.headers,
+                    safeResponse.durationMs
+                )
+
+                if (finalRes.statusCode in 200..299) {
+                    JsonExtractor.executeExtraction(finalRes.body, requestData.extractRules, project)
+                }
+
+                SwingUtilities.invokeLater {
+                    currentFuture = null // 清空引用
+                    onFinish(finalRes)
+                }
             }
         }
     }

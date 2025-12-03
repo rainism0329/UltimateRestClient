@@ -34,13 +34,22 @@ class RequestEditorPanel(
 
     private var activeCollectionNode: CollectionNode? = null
 
+    // [服务]
+    private val requestSender = RequestSender(project)
+
     // [UI组件]
-    private val addressBar = GeekAddressBar(project, { sendRequest() }, { curlText -> importCurl(curlText) })
+    private val addressBar = GeekAddressBar(
+        project,
+        onSend = { sendRequest() },
+        onCancel = { // [新增] 取消回调
+            requestSender.cancelCurrentRequest()
+            showBalloon("Request Cancelled!", MessageType.WARNING)
+        },
+        onImportCurl = { curlText -> importCurl(curlText) }
+    )
+
     private val inputPanel = RequestInputPanel(project)
     private val responsePanel = ResponsePanel(project)
-
-    // [服务]
-    private val requestSender = RequestSender(project) // 使用新的 Sender
 
     init {
         Disposer.register(this, responsePanel)
@@ -64,7 +73,6 @@ class RequestEditorPanel(
 
         setContent(mainContent)
 
-        // 快捷键支持 (Ctrl+Enter 发送)
         val sendAction = object : DumbAwareAction() {
             override fun actionPerformed(e: AnActionEvent) { sendRequest() }
         }
@@ -74,17 +82,17 @@ class RequestEditorPanel(
     override fun dispose() {}
 
     /**
-     * 发送请求的核心方法 (已重构，调用 RequestSender)
+     * 发送请求 (瘦身版)
      */
     private fun sendRequest() {
         if (addressBar.isBusy) return
 
-        // 1. 收集 UI 数据到临时对象
+        // 1. 收集 UI 数据
         val tempRequest = SavedRequest()
         collectData(tempRequest)
         val multipartParams = inputPanel.getMultipartParams()
 
-        // 2. 委托 RequestSender 处理业务逻辑
+        // 2. 委托 RequestSender
         requestSender.sendRequest(
             requestData = tempRequest,
             multipartParams = multipartParams,
@@ -96,22 +104,19 @@ class RequestEditorPanel(
                 addressBar.isBusy = false
                 responsePanel.updateResponse(response)
 
-                // 简单的提示
                 if (response.statusCode in 200..299 && tempRequest.extractRules.isNotEmpty()) {
-                    JBPopupFactory.getInstance().createHtmlTextBalloonBuilder("Variables Extracted!", MessageType.INFO, null)
-                        .setFadeoutTime(2000).createBalloon().show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
+                    showBalloon("Variables Extracted!", MessageType.INFO)
                 }
             }
         )
     }
 
-    // --- 以下是 UI 交互与工具栏逻辑 (保持精简) ---
+    // --- UI 工具栏与交互逻辑 ---
 
     private fun createTopToolbar(): ActionToolbar {
         val actionGroup = DefaultActionGroup()
         actionGroup.add(EnvironmentComboAction(project) {})
 
-        // 环境变量透视眼
         actionGroup.add(object : DumbAwareAction("View Variables", "Peek active environment variables", AllIcons.General.InspectionsEye) {
             override fun actionPerformed(e: AnActionEvent) {
                 val component = e.inputEvent?.component as? JComponent ?: return
@@ -137,7 +142,7 @@ class RequestEditorPanel(
         actionGroup.add(object : DumbAwareAction("Clear Cookies", "Clear all session cookies", AllIcons.Actions.GC) {
             override fun actionPerformed(e: AnActionEvent) {
                 HttpExecutor.clearCookies()
-                showBalloon("Cookies Cleared!", MessageType.INFO, addressBar)
+                showBalloon("Cookies Cleared!", MessageType.INFO)
             }
         })
         actionGroup.addSeparator()
@@ -225,7 +230,7 @@ class RequestEditorPanel(
         }
         inputPanel.setBodyType(bodyType)
         inputPanel.loadRequestData(emptyList(), curlReq.headers, curlReq.body, "noauth", mapOf(), emptyList())
-        showBalloon("Imported cURL!", MessageType.INFO, addressBar)
+        showBalloon("Imported cURL!", MessageType.INFO)
         return true
     }
 
@@ -234,7 +239,7 @@ class RequestEditorPanel(
         collectData(tempReq)
         val curlCmd = CurlConverter.toCurl(tempReq)
         CopyPasteManager.getInstance().setContents(StringSelection(curlCmd))
-        showBalloon("cURL copied to clipboard!", MessageType.INFO, addressBar)
+        showBalloon("cURL copied to clipboard!", MessageType.INFO)
     }
 
     private fun collectData(targetReq: SavedRequest) {
@@ -282,7 +287,8 @@ class RequestEditorPanel(
         return uniqueName
     }
 
-    private fun showBalloon(msg: String, type: MessageType, target: JComponent) {
+    // 简化版 showBalloon
+    private fun showBalloon(msg: String, type: MessageType, target: JComponent = addressBar) {
         JBPopupFactory.getInstance().createHtmlTextBalloonBuilder(msg, type, null)
             .setFadeoutTime(1500).createBalloon().show(RelativePoint.getCenterOf(target), Balloon.Position.below)
     }
