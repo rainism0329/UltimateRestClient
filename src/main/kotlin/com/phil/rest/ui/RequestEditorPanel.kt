@@ -1,7 +1,5 @@
 package com.phil.rest.ui
 
-import com.fasterxml.jackson.databind.ObjectMapper
-import com.fasterxml.jackson.databind.SerializationFeature
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.*
@@ -24,6 +22,10 @@ import com.phil.rest.ui.action.EnvironmentComboAction
 import com.phil.rest.ui.component.GeekAddressBar
 import java.awt.BorderLayout
 import java.awt.datatransfer.StringSelection
+import java.util.ArrayList
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.atomic.AtomicLong
 import javax.swing.JComponent
 import javax.swing.JPanel
 
@@ -41,7 +43,7 @@ class RequestEditorPanel(
     private val addressBar = GeekAddressBar(
         project,
         onSend = { sendRequest() },
-        onCancel = { // [新增] 取消回调
+        onCancel = {
             requestSender.cancelCurrentRequest()
             showBalloon("Request Cancelled!", MessageType.WARNING)
         },
@@ -82,17 +84,15 @@ class RequestEditorPanel(
     override fun dispose() {}
 
     /**
-     * 发送请求 (瘦身版)
+     * 发送单次请求
      */
     private fun sendRequest() {
         if (addressBar.isBusy) return
 
-        // 1. 收集 UI 数据
         val tempRequest = SavedRequest()
         collectData(tempRequest)
         val multipartParams = inputPanel.getMultipartParams()
 
-        // 2. 委托 RequestSender
         requestSender.sendRequest(
             requestData = tempRequest,
             multipartParams = multipartParams,
@@ -111,12 +111,105 @@ class RequestEditorPanel(
         )
     }
 
-    // --- UI 工具栏与交互逻辑 ---
+    /**
+     * [Blast Mode] 饱和式压测
+     */
+    private fun performBlastTest() {
+        val input = Messages.showInputDialog(project, "Enter number of requests (1-100):", "Blast Mode 🚀", Messages.getQuestionIcon(), "10", null)
+        val count = input?.toIntOrNull() ?: return
+        if (count !in 1..100) {
+            Messages.showErrorDialog("Please enter a number between 1 and 100.", "Invalid Input")
+            return
+        }
+
+        // 收集一次数据
+        val tempReq = SavedRequest()
+        collectData(tempReq)
+        val multipartParams = inputPanel.getMultipartParams()
+
+        // 预解析变量，模拟高并发下的静态请求
+        val env = EnvService.getInstance(project).selectedEnv
+        fun resolve(s: String?) = s?.let { str ->
+            var res = str
+            env?.variables?.forEach { (k, v) -> res = res.replace("{{$k}}", v) }
+            res
+        } ?: ""
+
+        val finalUrl = resolve(tempReq.url)
+        val finalBody = resolve(tempReq.bodyContent)
+        val headers = ArrayList<RestParam>()
+        tempReq.headers.forEach { headers.add(RestParam(it.name, resolve(it.value), RestParam.ParamType.HEADER, "String")) }
+        // (注：简单的压测暂不包含复杂的 Auth 重新计算，假设 header 够用了)
+
+        val threadPool = Executors.newFixedThreadPool(5)
+        val completed = AtomicInteger(0)
+        val successCount = AtomicInteger(0)
+        val totalTime = AtomicLong(0)
+        val minTime = AtomicLong(Long.MAX_VALUE)
+        val maxTime = AtomicLong(0)
+
+        com.intellij.openapi.progress.ProgressManager.getInstance().run(object : com.intellij.openapi.progress.Task.Backgroundable(project, "Blasting API...", true) {
+            override fun run(indicator: com.intellij.openapi.progress.ProgressIndicator) {
+                val executor = HttpExecutor()
+                val futures = ArrayList<java.util.concurrent.Future<*>>()
+
+                for (i in 1..count) {
+                    if (indicator.isCanceled) break
+                    futures.add(threadPool.submit {
+                        // 同步执行
+                        val res = executor.execute(tempReq.method, finalUrl, finalBody, headers, multipartParams)
+
+                        val current = completed.incrementAndGet()
+                        indicator.fraction = current.toDouble() / count
+                        indicator.text = "Request $current / $count"
+
+                        if (res.statusCode in 200..299) {
+                            successCount.incrementAndGet()
+                            totalTime.addAndGet(res.durationMs)
+
+                            var cMin = minTime.get()
+                            while (res.durationMs < cMin && !minTime.compareAndSet(cMin, res.durationMs)) cMin = minTime.get()
+
+                            var cMax = maxTime.get()
+                            while (res.durationMs > cMax && !maxTime.compareAndSet(cMax, res.durationMs)) cMax = maxTime.get()
+                        }
+                    })
+                }
+                futures.forEach { try { it.get() } catch (e: Exception) {} }
+                threadPool.shutdown()
+            }
+
+            override fun onSuccess() {
+                val avg = if (successCount.get() > 0) totalTime.get() / successCount.get() else 0
+                val report = """
+                    <html>
+                    <h3>🚀 Blast Report</h3>
+                    <ul>
+                        <li><b>Total Requests:</b> $count</li>
+                        <li><b>Success:</b> <span style='color:green'>${successCount.get()}</span></li>
+                        <li><b>Failed:</b> <span style='color:red'>${count - successCount.get()}</span></li>
+                        <hr>
+                        <li><b>Avg Latency:</b> ${avg}ms</li>
+                        <li><b>Min Latency:</b> ${if (minTime.get() == Long.MAX_VALUE) 0 else minTime.get()}ms</li>
+                        <li><b>Max Latency:</b> ${maxTime.get()}ms</li>
+                    </ul>
+                    </html>
+                """.trimIndent()
+
+                JBPopupFactory.getInstance().createHtmlTextBalloonBuilder(report, null, JBColor.PanelBackground, null)
+                    .setShadow(true).setHideOnAction(false).setCloseButtonEnabled(true).createBalloon()
+                    .show(RelativePoint.getCenterOf(addressBar), Balloon.Position.below)
+            }
+        })
+    }
+
+    // --- Toolbar & UI ---
 
     private fun createTopToolbar(): ActionToolbar {
         val actionGroup = DefaultActionGroup()
         actionGroup.add(EnvironmentComboAction(project) {})
 
+        // 环境变量透视眼
         actionGroup.add(object : DumbAwareAction("View Variables", "Peek active environment variables", AllIcons.General.InspectionsEye) {
             override fun actionPerformed(e: AnActionEvent) {
                 val component = e.inputEvent?.component as? JComponent ?: return
@@ -146,6 +239,8 @@ class RequestEditorPanel(
             }
         })
         actionGroup.addSeparator()
+
+        // cURL Actions
         actionGroup.add(object : DumbAwareAction("Import cURL", "Paste cURL command to import", AllIcons.Actions.Upload) {
             override fun actionPerformed(e: AnActionEvent) {
                 val curlText = Messages.showMultilineInputDialog(project, "Paste your cURL command here:", "Import cURL", null, Messages.getQuestionIcon(), null)
@@ -157,16 +252,14 @@ class RequestEditorPanel(
         actionGroup.add(object : DumbAwareAction("Copy as cURL", "Copy request as cURL command", AllIcons.Actions.Copy) {
             override fun actionPerformed(e: AnActionEvent) { copyAsCurl() }
         })
-        // [新增] Generate Code 按钮
+
+        // [新增] Code Gen
         actionGroup.add(object : DumbAwareAction("Generate Code", "Generate Java/Kotlin client code", AllIcons.Nodes.Class) {
             override fun actionPerformed(e: AnActionEvent) {
                 val component = e.inputEvent?.component as? JComponent ?: return
-
-                // 收集当前请求数据
                 val tempReq = SavedRequest()
                 collectData(tempReq)
 
-                // 创建 Popup 菜单
                 val group = DefaultActionGroup()
                 group.add(object : AnAction("Java 11 HttpClient") {
                     override fun actionPerformed(e: AnActionEvent) {
@@ -182,13 +275,24 @@ class RequestEditorPanel(
                         showBalloon("Kotlin code copied!", MessageType.INFO, component)
                     }
                 })
-
                 JBPopupFactory.getInstance()
                     .createActionGroupPopup("Generate Code", group, e.dataContext, JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false)
                     .showUnderneathOf(component)
             }
         })
+
         actionGroup.addSeparator()
+
+        // [新增] Blast Mode
+        actionGroup.add(object : DumbAwareAction("Blast Mode", "Run mini stress test", AllIcons.General.Error) {
+            override fun actionPerformed(e: AnActionEvent) {
+                performBlastTest()
+            }
+        })
+
+        actionGroup.addSeparator()
+
+        // Save Actions
         actionGroup.add(object : DumbAwareAction("Save", "Save current request", AllIcons.Actions.MenuSaveall) {
             override fun actionPerformed(e: AnActionEvent) {
                 if (activeCollectionNode != null) updateExistingRequest() else createNewRequestFlow()
@@ -318,7 +422,6 @@ class RequestEditorPanel(
         return uniqueName
     }
 
-    // 简化版 showBalloon
     private fun showBalloon(msg: String, type: MessageType, target: JComponent = addressBar) {
         JBPopupFactory.getInstance().createHtmlTextBalloonBuilder(msg, type, null)
             .setFadeoutTime(1500).createBalloon().show(RelativePoint.getCenterOf(target), Balloon.Position.below)

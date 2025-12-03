@@ -1,5 +1,8 @@
 package com.phil.rest.ui
 
+import com.intellij.diff.DiffContentFactory
+import com.intellij.diff.DiffManager
+import com.intellij.diff.requests.SimpleDiffRequest
 import com.intellij.icons.AllIcons
 import com.intellij.json.JsonFileType
 import com.intellij.openapi.Disposable
@@ -31,7 +34,10 @@ import com.intellij.ui.components.JBTextArea
 import com.intellij.util.ui.JBUI
 import com.phil.rest.model.RestResponse
 import com.phil.rest.service.CodeGenerator
-import java.awt.*
+import java.awt.BorderLayout
+import java.awt.Color
+import java.awt.FlowLayout
+import java.awt.Font
 import java.awt.datatransfer.StringSelection
 import javax.swing.*
 
@@ -40,18 +46,22 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
     private var editor: Editor? = null // Pretty JSON Editor
     private val document = EditorFactory.getInstance().createDocument("")
 
-    // [新增] Hex View 组件
+    // [Fix] 数据黑匣子：独立存储 Body 内容，不受 UI clear() 影响
+    private var previousBody: String? = null
+    private var currentBody: String? = null
+
+    // Hex View 组件
     private val hexTextArea = JBTextArea().apply {
         font = Font("JetBrains Mono", Font.PLAIN, 12)
         isEditable = false
-        foreground = JBColor(Color(0, 128, 0), Color(169, 183, 198)) // 极客绿/白
+        foreground = JBColor(Color(0, 128, 0), Color(169, 183, 198)) // Matrix Green
         background = JBColor(Color(245, 245, 245), Color(43, 43, 43))
     }
 
     // 图片组件
     private val imageLabel = JLabel("", SwingConstants.CENTER)
 
-    // [修改] 使用 TabbedPane
+    // 多视图切换
     private val tabs = JBTabbedPane()
 
     // 状态栏
@@ -78,6 +88,7 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
 
         val actionGroup = DefaultActionGroup()
         actionGroup.add(createCopyAction())
+        actionGroup.add(createDiffAction()) // Diff 按钮
         actionGroup.add(createExportAction())
         val toolbar = ActionManager.getInstance().createActionToolbar("ResponseToolbar", actionGroup, true)
         toolbar.targetComponent = this
@@ -95,16 +106,12 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
             isLineNumbersShown = true
             isFoldingOutlineShown = true
             isIndentGuidesShown = true
+            isUseSoftWraps = true
         }
 
         // --- 组装 Tabs ---
-        // Tab 1: Pretty (Text Editor) - 默认
         tabs.addTab("Pretty", editor!!.component)
-
-        // Tab 2: Image (Image Label)
         tabs.addTab("Preview", ScrollPaneFactory.createScrollPane(imageLabel))
-
-        // Tab 3: Hex (Raw Bytes) - [新增]
         tabs.addTab("Hex", ScrollPaneFactory.createScrollPane(hexTextArea))
 
         add(headerPanel, BorderLayout.NORTH)
@@ -113,11 +120,20 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
 
     fun updateResponse(response: RestResponse?) {
         if (response == null) {
-            clear()
+            clear() // 这里的 clear 只是为了重置 UI，不应影响数据流转
             return
         }
 
-        // 1. 更新 Pretty View (Text)
+        // [Fix] 核心修复：使用 currentBody 变量进行历史轮转，而不是读取 document.text
+        // 因为 document.text 在请求开始时已经被 clear() 清空了
+        if (!currentBody.isNullOrBlank()) {
+            previousBody = currentBody
+        }
+
+        // 更新当前 Body
+        currentBody = response.body
+
+        // 1. 更新 Pretty View
         WriteCommandAction.runWriteCommandAction(project) {
             document.setText(StringUtil.convertLineSeparators(response.body))
         }
@@ -125,10 +141,8 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
 
         // 2. 更新 Image View
         if (response.rawBody != null && response.rawBody.isNotEmpty()) {
-            // 简单的图片判断，实际应该判断 Content-Type
             try {
                 val icon = ImageIcon(response.rawBody)
-                // 只有当图片有效（宽>0）时才显示
                 if (icon.iconWidth > 0) {
                     imageLabel.icon = icon
                     imageLabel.text = ""
@@ -138,13 +152,14 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
                 }
             } catch (e: Exception) {
                 imageLabel.icon = null
+                imageLabel.text = "Error Loading Image"
             }
         } else {
             imageLabel.icon = null
             imageLabel.text = "Empty Body"
         }
 
-        // 3. 更新 Hex View [核心功能]
+        // 3. 更新 Hex View
         val hexDump = CodeGenerator.generateHexDump(response.rawBody ?: ByteArray(0))
         hexTextArea.text = hexDump
         hexTextArea.caretPosition = 0
@@ -152,9 +167,9 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
         // 4. 智能切换 Tab
         val contentType = response.headers["Content-Type"]?.firstOrNull() ?: ""
         if (contentType.startsWith("image/")) {
-            tabs.selectedIndex = 1 // 选中 Image Tab
+            tabs.selectedIndex = 1 // Preview
         } else {
-            tabs.selectedIndex = 0 // 选中 Pretty Tab
+            tabs.selectedIndex = 0 // Pretty
         }
 
         // 5. 更新状态栏
@@ -175,22 +190,49 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
     }
 
     fun clear() {
+        // [注意] 这里只清空 UI 显示，绝对不要清空 previousBody 和 currentBody
         WriteCommandAction.runWriteCommandAction(project) { document.setText("") }
         imageLabel.icon = null
         hexTextArea.text = ""
         statusLabel.text = "Ready"
         statusLabel.icon = AllIcons.General.Balloon
+        statusLabel.foreground = JBUI.CurrentTheme.ContextHelp.FOREGROUND
         timeLabel.text = ""
         tabs.selectedIndex = 0
     }
 
     private fun getStatusText(code: Int): String = when(code) {
-        200 -> "OK"; 201 -> "Created"; 404 -> "Not Found"; 500 -> "Server Error"
+        200 -> "OK"; 201 -> "Created"; 204 -> "No Content"
+        400 -> "Bad Request"; 401 -> "Unauthorized"; 403 -> "Forbidden"; 404 -> "Not Found"
+        500 -> "Internal Server Error"; 502 -> "Bad Gateway"
         else -> ""
     }
 
     override fun dispose() {
         editor?.let { if (!it.isDisposed) EditorFactory.getInstance().releaseEditor(it) }
+    }
+
+    // Actions
+
+    private fun createDiffAction() = object : DumbAwareAction("Compare with Previous", "Diff current vs previous response", AllIcons.Actions.Diff) {
+        override fun actionPerformed(e: AnActionEvent) {
+            // [Fix] 使用变量而非 document 读取，更安全
+            val curr = currentBody
+            val prev = previousBody
+
+            if (prev.isNullOrBlank() || curr.isNullOrBlank()) {
+                // [Fix] 更新为您喜欢的提示文案
+                showBalloon("Send another request to generate a comparison!", MessageType.WARNING)
+                return
+            }
+
+            val contentFactory = DiffContentFactory.getInstance()
+            val content1 = contentFactory.create(prev, JsonFileType.INSTANCE)
+            val content2 = contentFactory.create(curr, JsonFileType.INSTANCE)
+
+            val request = SimpleDiffRequest("Response Diff", content1, content2, "Previous Response", "Current Response")
+            DiffManager.getInstance().showDiff(project, request)
+        }
     }
 
     private fun createCopyAction() = object : DumbAwareAction("Copy", "Copy body", AllIcons.Actions.Copy) {
@@ -203,16 +245,23 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
         }
     }
 
-    // Export Action 保持不变...
     private fun createExportAction() = object : DumbAwareAction("Export", "Export to file", AllIcons.Actions.MenuSaveall) {
         override fun actionPerformed(e: AnActionEvent) {
-            // ... 与之前相同 ...
+            val descriptor = FileSaverDescriptor("Export Response", "Save response body", "json", "txt")
+            val dialog = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)
+            val wrapper = dialog.save(null as VirtualFile?, "response.json")
+            if (wrapper != null) {
+                try {
+                    wrapper.file.writeText(document.text)
+                    showBalloon("Saved to ${wrapper.file.name}", MessageType.INFO)
+                } catch (ex: Exception) {}
+            }
         }
     }
 
     private fun showBalloon(msg: String, type: MessageType) {
         JBPopupFactory.getInstance().createHtmlTextBalloonBuilder(msg, type, null)
-            .setFadeoutTime(1500).createBalloon()
+            .setFadeoutTime(2000).createBalloon()
             .show(RelativePoint.getSouthEastOf(statusLabel), Balloon.Position.atRight)
     }
 }
