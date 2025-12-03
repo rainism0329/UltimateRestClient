@@ -1,5 +1,7 @@
 package com.phil.rest.ui
 
+import com.fasterxml.jackson.databind.ObjectMapper
+import com.fasterxml.jackson.databind.SerializationFeature
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.Disposable
 import com.intellij.openapi.actionSystem.*
@@ -75,6 +77,7 @@ class RequestEditorPanel(
 
         setContent(mainContent)
 
+        // 快捷键支持 (Ctrl+Enter 发送)
         val sendAction = object : DumbAwareAction() {
             override fun actionPerformed(e: AnActionEvent) { sendRequest() }
         }
@@ -104,6 +107,15 @@ class RequestEditorPanel(
                 addressBar.isBusy = false
                 responsePanel.updateResponse(response)
 
+                // [极客反馈] 呼吸灯闪烁
+                if (response.statusCode == 0 || response.statusCode >= 400) {
+                    // 错误：红光呼吸
+                    addressBar.flash(JBColor.RED)
+                } else {
+                    // 成功：绿光呼吸 (给予正向反馈)
+                    addressBar.flash(JBColor.GREEN)
+                }
+
                 if (response.statusCode in 200..299 && tempRequest.extractRules.isNotEmpty()) {
                     showBalloon("Variables Extracted!", MessageType.INFO)
                 }
@@ -127,7 +139,7 @@ class RequestEditorPanel(
         collectData(tempReq)
         val multipartParams = inputPanel.getMultipartParams()
 
-        // 预解析变量，模拟高并发下的静态请求
+        // 预解析变量
         val env = EnvService.getInstance(project).selectedEnv
         fun resolve(s: String?) = s?.let { str ->
             var res = str
@@ -139,7 +151,6 @@ class RequestEditorPanel(
         val finalBody = resolve(tempReq.bodyContent)
         val headers = ArrayList<RestParam>()
         tempReq.headers.forEach { headers.add(RestParam(it.name, resolve(it.value), RestParam.ParamType.HEADER, "String")) }
-        // (注：简单的压测暂不包含复杂的 Auth 重新计算，假设 header 够用了)
 
         val threadPool = Executors.newFixedThreadPool(5)
         val completed = AtomicInteger(0)
@@ -156,7 +167,6 @@ class RequestEditorPanel(
                 for (i in 1..count) {
                     if (indicator.isCanceled) break
                     futures.add(threadPool.submit {
-                        // 同步执行
                         val res = executor.execute(tempReq.method, finalUrl, finalBody, headers, multipartParams)
 
                         val current = completed.incrementAndGet()
@@ -253,7 +263,7 @@ class RequestEditorPanel(
             override fun actionPerformed(e: AnActionEvent) { copyAsCurl() }
         })
 
-        // [新增] Code Gen
+        // Code Gen
         actionGroup.add(object : DumbAwareAction("Generate Code", "Generate Java/Kotlin client code", AllIcons.Nodes.Class) {
             override fun actionPerformed(e: AnActionEvent) {
                 val component = e.inputEvent?.component as? JComponent ?: return
@@ -283,7 +293,7 @@ class RequestEditorPanel(
 
         actionGroup.addSeparator()
 
-        // [新增] Blast Mode
+        // Blast Mode
         actionGroup.add(object : DumbAwareAction("Blast Mode", "Run mini stress test", AllIcons.General.Error) {
             override fun actionPerformed(e: AnActionEvent) {
                 performBlastTest()

@@ -4,7 +4,11 @@ import com.intellij.icons.AllIcons
 import com.intellij.ui.ColoredTreeCellRenderer
 import com.intellij.ui.SimpleTextAttributes
 import com.phil.rest.model.ApiDefinition
+import com.phil.rest.ui.render.UIConstants
+import java.awt.*
+import javax.swing.Icon
 import javax.swing.JTree
+import javax.swing.tree.DefaultMutableTreeNode
 
 class ApiTreeCellRenderer : ColoredTreeCellRenderer() {
     override fun customizeCellRenderer(
@@ -16,33 +20,59 @@ class ApiTreeCellRenderer : ColoredTreeCellRenderer() {
         row: Int,
         hasFocus: Boolean
     ) {
-        val node = value as? javax.swing.tree.DefaultMutableTreeNode ?: return
+        val node = value as? DefaultMutableTreeNode ?: return
         val userObject = node.userObject ?: return
 
-        when (userObject) {
-            is String -> {
-                // 项目名称 (Root) 或 Controller 名称
-                // 判断是否是 Controller (根据层级简单判断，或者判断是否包含 ApiDefinition 子节点)
-                if (node.level == 1) {
-                    icon = AllIcons.Nodes.Class
-                    append(userObject, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
-                } else {
-                    icon = AllIcons.Nodes.Project
-                    append(userObject)
-                }
+        if (userObject is String) {
+            if (node.level == 1) {
+                icon = AllIcons.Nodes.Class
+                append(userObject, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+            } else {
+                icon = AllIcons.Nodes.Project
+                append(userObject)
             }
-            is ApiDefinition -> {
-                // API 节点
-                // 根据 HTTP Method 设置不同的图标或颜色 (这里暂时统一用 Method 图标)
-                icon = AllIcons.Nodes.Method
-
-                // 拼接显示文本: [GET] /api/users
-                append("[${userObject.method}] ", SimpleTextAttributes.GRAY_ATTRIBUTES)
-                append(userObject.url, SimpleTextAttributes.REGULAR_ATTRIBUTES)
-
-                // 可以追加方法名作为提示
-                append("  (${userObject.methodName})", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
-            }
+            return
         }
+
+        if (userObject is ApiDefinition) {
+            // 使用新版徽章
+            icon = MethodBadgeIcon(userObject.method)
+
+            append(" ${userObject.methodName}", SimpleTextAttributes.REGULAR_ATTRIBUTES)
+            append("  ${userObject.url}", SimpleTextAttributes.GRAYED_SMALL_ATTRIBUTES)
+        }
+    }
+
+    /**
+     * Outline + Tint 风格 (复用自 CollectionTreeCellRenderer)
+     */
+    private class MethodBadgeIcon(val method: String) : Icon {
+        override fun paintIcon(c: Component?, g: Graphics?, x: Int, y: Int) {
+            val g2 = g as Graphics2D
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+
+            val baseColor = UIConstants.getMethodColor(method)
+
+            // 1. Tint Background
+            g2.color = Color(baseColor.red, baseColor.green, baseColor.blue, 40)
+            g2.fillRoundRect(x, y + 1, iconWidth, iconHeight - 2, 6, 6)
+
+            // 2. Outline
+            g2.color = baseColor
+            g2.drawRoundRect(x, y + 1, iconWidth, iconHeight - 2, 6, 6)
+
+            // 3. Text
+            g2.color = baseColor
+            g2.font = g2.font.deriveFont(Font.BOLD, 10f)
+
+            val fm = g2.fontMetrics
+            val textX = x + (iconWidth - fm.stringWidth(method.uppercase())) / 2
+            val textY = y + (iconHeight - fm.height) / 2 + fm.ascent
+
+            g2.drawString(method.uppercase(), textX, textY)
+        }
+
+        override fun getIconWidth(): Int = 42
+        override fun getIconHeight(): Int = 18
     }
 }
