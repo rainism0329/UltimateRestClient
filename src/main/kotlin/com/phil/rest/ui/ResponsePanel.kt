@@ -20,18 +20,18 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.MessageType
 import com.intellij.openapi.ui.popup.Balloon
 import com.intellij.openapi.ui.popup.JBPopupFactory
-import com.intellij.openapi.util.text.StringUtil // [新增 Import]
+import com.intellij.openapi.util.text.StringUtil
 import com.intellij.openapi.vfs.VirtualFile
 import com.intellij.ui.JBColor
+import com.intellij.ui.ScrollPaneFactory
 import com.intellij.ui.awt.RelativePoint
 import com.intellij.ui.components.JBLabel
 import com.intellij.util.ui.JBUI
 import com.phil.rest.model.RestResponse
-import java.awt.BorderLayout
-import java.awt.Color
-import java.awt.FlowLayout
-import java.awt.Font
+import java.awt.*
 import java.awt.datatransfer.StringSelection
+import javax.swing.ImageIcon
+import javax.swing.JLabel
 import javax.swing.JPanel
 import javax.swing.SwingConstants
 
@@ -39,6 +39,10 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
 
     private var editor: Editor? = null
     private val document = EditorFactory.getInstance().createDocument("")
+
+    // [新增] 图片容器
+    private val imageLabel = JLabel("", SwingConstants.CENTER)
+    private val contentPanel = JPanel(CardLayout()) // 使用 CardLayout 切换 Text/Image
 
     // --- 状态栏组件 ---
     private val statusLabel = JBLabel("Ready", AllIcons.General.Balloon, SwingConstants.LEFT).apply {
@@ -91,8 +95,13 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
         settings.isVirtualSpace = false
         settings.isCaretRowShown = false
 
+        // [核心修改] 组装 CardLayout
+        contentPanel.add(editor!!.component, "TEXT")
+        // 图片外面包一个 ScrollPane，防止图片过大撑爆布局
+        contentPanel.add(ScrollPaneFactory.createScrollPane(imageLabel), "IMAGE")
+
         add(headerPanel, BorderLayout.NORTH)
-        add(editor!!.component, BorderLayout.CENTER)
+        add(contentPanel, BorderLayout.CENTER)
     }
 
     fun updateResponse(response: RestResponse?) {
@@ -101,14 +110,37 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
             return
         }
 
-        WriteCommandAction.runWriteCommandAction(project) {
-            // [修复的核心代码] 将所有换行符转换为 \n，防止 IDEA Document 报错
-            val normalizedBody = StringUtil.convertLineSeparators(response.body)
-            document.setText(normalizedBody)
+        val layout = contentPanel.layout as CardLayout
+
+        // 1. 获取 Content-Type 判断是否为图片
+        val contentTypeHeader = response.headers["Content-Type"] ?: response.headers["content-type"]
+        val contentType = contentTypeHeader?.firstOrNull() ?: ""
+
+        if (contentType.startsWith("image/")) {
+            // --- 图片渲染模式 ---
+            try {
+                if (response.rawBody != null && response.rawBody.isNotEmpty()) {
+                    val icon = ImageIcon(response.rawBody)
+                    imageLabel.icon = icon
+                    imageLabel.text = "" // 清空文字
+                    layout.show(contentPanel, "IMAGE")
+                } else {
+                    imageLabel.icon = null
+                    imageLabel.text = "[Empty Image Body]"
+                    layout.show(contentPanel, "IMAGE")
+                }
+            } catch (e: Exception) {
+                // 如果解析失败，回退到文本模式显示乱码或错误
+                setTextResponse(response.body)
+                layout.show(contentPanel, "TEXT")
+            }
+        } else {
+            // --- 文本/JSON 渲染模式 ---
+            setTextResponse(response.body)
+            layout.show(contentPanel, "TEXT")
         }
 
-        editor?.scrollingModel?.scrollTo(editor!!.offsetToLogicalPosition(0), ScrollType.MAKE_VISIBLE)
-
+        // 更新状态栏
         statusLabel.text = "${response.statusCode} ${getStatusText(response.statusCode)}"
         timeLabel.text = "${response.durationMs} ms"
 
@@ -121,12 +153,22 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
         }
     }
 
+    private fun setTextResponse(bodyText: String) {
+        WriteCommandAction.runWriteCommandAction(project) {
+            val normalizedBody = StringUtil.convertLineSeparators(bodyText)
+            document.setText(normalizedBody)
+        }
+        editor?.scrollingModel?.scrollTo(editor!!.offsetToLogicalPosition(0), ScrollType.MAKE_VISIBLE)
+    }
+
     fun clear() {
         WriteCommandAction.runWriteCommandAction(project) { document.setText("") }
+        imageLabel.icon = null // 清空图片
         statusLabel.text = "Ready"
         statusLabel.icon = AllIcons.General.Balloon
         statusLabel.foreground = JBUI.CurrentTheme.ContextHelp.FOREGROUND
         timeLabel.text = ""
+        (contentPanel.layout as CardLayout).show(contentPanel, "TEXT")
     }
 
     private fun getStatusText(code: Int): String = when(code) {
@@ -159,6 +201,8 @@ class ResponsePanel(private val project: Project) : JPanel(BorderLayout()), Disp
             val wrapper = dialog.save(null as VirtualFile?, "response.json")
             if (wrapper != null) {
                 try {
+                    // 简单起见，Export 还是存文本。
+                    // 如果要做得更完美，可以根据当前是文本模式还是图片模式，决定写入 text 还是 bytes
                     wrapper.file.writeText(document.text)
                     showBalloon("Saved to ${wrapper.file.name}", MessageType.INFO)
                 } catch (ex: Exception) {}

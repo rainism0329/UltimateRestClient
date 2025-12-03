@@ -12,6 +12,7 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.StandardCharsets; // [新增]
 import java.nio.file.Path;
 import java.security.SecureRandom;
 import java.security.cert.X509Certificate;
@@ -21,6 +22,7 @@ import java.util.Map;
 
 public class HttpExecutor {
 
+    // ... (static block, cookieManager, createInsecureClient 保持不变) ...
     static {
         System.setProperty("jdk.internal.httpclient.disableHostnameVerification", "true");
     }
@@ -59,8 +61,6 @@ public class HttpExecutor {
         }
     }
 
-    // [重构] 增加 multipartParams 参数
-    // 如果这个 list 不为空，则 body 参数被忽略，转而构建 Multipart
     public RestResponse execute(String method, String url, String body, List<RestParam> headers, List<RestParam> multipartParams) {
         if (!url.startsWith("http")) url = "http://" + url;
 
@@ -70,42 +70,31 @@ public class HttpExecutor {
                     .uri(URI.create(url))
                     .timeout(Duration.ofSeconds(30));
 
-            // 构建 Body Publisher
             HttpRequest.BodyPublisher bodyPublisher;
 
             if (multipartParams != null && !multipartParams.isEmpty()) {
-                // --- Multipart 模式 ---
                 MultipartBodyPublisher multipartBuilder = new MultipartBodyPublisher();
                 for (RestParam param : multipartParams) {
                     if ("File".equals(param.getDataType())) {
-                        // 是文件
                         multipartBuilder.addPart(param.getName(), Path.of(param.getValue()));
                     } else {
-                        // 是文本
                         multipartBuilder.addPart(param.getName(), param.getValue());
                     }
                 }
                 bodyPublisher = multipartBuilder.buildSimple();
-
-                // 必须显式设置 Content-Type 并带上 boundary
                 builder.header("Content-Type", "multipart/form-data; boundary=" + multipartBuilder.getBoundary());
             } else {
-                // --- 普通模式 ---
-                // 1. Content-Type 自动补全
                 boolean hasContentType = headers.stream().anyMatch(h -> "Content-Type".equalsIgnoreCase(h.getName()));
                 if (!hasContentType && body != null && !body.isBlank()) {
                     builder.header("Content-Type", "application/json");
                 }
-
                 bodyPublisher = (body != null && !body.isBlank())
                         ? HttpRequest.BodyPublishers.ofString(body)
                         : HttpRequest.BodyPublishers.noBody();
             }
 
-            // 2. 填充 Headers (注意不要覆盖 Multipart 的 Content-Type)
             for (RestParam header : headers) {
                 if (header.getName() != null && !header.getName().isBlank()) {
-                    // 如果是 Multipart 模式，跳过用户自定义的 Content-Type，防止覆盖 boundary
                     if (multipartParams != null && !multipartParams.isEmpty() && "Content-Type".equalsIgnoreCase(header.getName())) {
                         continue;
                     }
@@ -124,18 +113,23 @@ public class HttpExecutor {
                 default: builder.method(method, bodyPublisher);
             }
 
-            HttpResponse<String> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofString());
+            // [核心修改] 使用 ofByteArray 读取原始字节
+            HttpResponse<byte[]> response = client.send(builder.build(), HttpResponse.BodyHandlers.ofByteArray());
             long duration = System.currentTimeMillis() - startTime;
 
-            return new RestResponse(response.statusCode(), response.body(), response.headers().map(), duration);
+            byte[] rawBytes = response.body();
+            // 尝试将字节转为字符串 (默认为 UTF-8，这就足够应对 99% 的 JSON 场景)
+            String bodyString = new String(rawBytes, StandardCharsets.UTF_8);
+
+            return new RestResponse(response.statusCode(), bodyString, rawBytes, response.headers().map(), duration);
 
         } catch (Exception e) {
             long duration = System.currentTimeMillis() - startTime;
-            return new RestResponse(0, "Request Failed: " + e.toString(), Map.of(), duration);
+            // 错误时，rawBody 传空字节数组
+            return new RestResponse(0, "Request Failed: " + e.toString(), new byte[0], Map.of(), duration);
         }
     }
 
-    // 重载旧方法，保持兼容
     public RestResponse execute(String method, String url, String body, List<RestParam> headers) {
         return execute(method, url, body, headers, null);
     }
