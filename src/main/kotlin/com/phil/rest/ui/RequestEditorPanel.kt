@@ -157,6 +157,37 @@ class RequestEditorPanel(
         actionGroup.add(object : DumbAwareAction("Copy as cURL", "Copy request as cURL command", AllIcons.Actions.Copy) {
             override fun actionPerformed(e: AnActionEvent) { copyAsCurl() }
         })
+        // [新增] Generate Code 按钮
+        actionGroup.add(object : DumbAwareAction("Generate Code", "Generate Java/Kotlin client code", AllIcons.Nodes.Class) {
+            override fun actionPerformed(e: AnActionEvent) {
+                val component = e.inputEvent?.component as? JComponent ?: return
+
+                // 收集当前请求数据
+                val tempReq = SavedRequest()
+                collectData(tempReq)
+
+                // 创建 Popup 菜单
+                val group = DefaultActionGroup()
+                group.add(object : AnAction("Java 11 HttpClient") {
+                    override fun actionPerformed(e: AnActionEvent) {
+                        val code = CodeGenerator.generateJava11(tempReq)
+                        CopyPasteManager.getInstance().setContents(StringSelection(code))
+                        showBalloon("Java code copied!", MessageType.INFO, component)
+                    }
+                })
+                group.add(object : AnAction("Kotlin OkHttp") {
+                    override fun actionPerformed(e: AnActionEvent) {
+                        val code = CodeGenerator.generateKotlinOkHttp(tempReq)
+                        CopyPasteManager.getInstance().setContents(StringSelection(code))
+                        showBalloon("Kotlin code copied!", MessageType.INFO, component)
+                    }
+                })
+
+                JBPopupFactory.getInstance()
+                    .createActionGroupPopup("Generate Code", group, e.dataContext, JBPopupFactory.ActionSelectionAid.SPEEDSEARCH, false)
+                    .showUnderneathOf(component)
+            }
+        })
         actionGroup.addSeparator()
         actionGroup.add(object : DumbAwareAction("Save", "Save current request", AllIcons.Actions.MenuSaveall) {
             override fun actionPerformed(e: AnActionEvent) {
