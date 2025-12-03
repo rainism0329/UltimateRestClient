@@ -10,54 +10,120 @@ import com.intellij.util.ui.JBUI
 import com.phil.rest.ui.render.UIConstants
 import java.awt.*
 import java.awt.datatransfer.DataFlavor
+import java.awt.event.ActionListener
 import java.awt.event.MouseAdapter
 import java.awt.event.MouseEvent
 import java.awt.geom.RoundRectangle2D
 import javax.swing.*
+import kotlin.math.sin
 
 class GeekAddressBar(
     private val project: Project,
     private val onSend: () -> Unit,
-    private val onCancel: () -> Unit, // [新增] 取消回调
+    private val onCancel: () -> Unit,
     private val onImportCurl: (String) -> Boolean
 ) : JPanel(BorderLayout()) {
 
     private var selectedMethod = "GET"
-    private var progressWidth = 0
+
+    // [动画参数]
+    private var progressWidth = 0.0 // 改为 double 获得更平滑的动画
     private var timer: Timer? = null
 
     var isBusy: Boolean = false
         set(value) {
             field = value
             sendBtn.repaint()
-            // 加载时依然保持手型指针，因为现在它是 Cancel 按钮
-            sendBtn.cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
+            sendBtn.cursor = if (value) Cursor.getPredefinedCursor(Cursor.HAND_CURSOR) else Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
 
             if (value) {
-                progressWidth = 0
+                progressWidth = 0.0
                 timer?.stop()
-                timer = Timer(10) {
+                // 提高帧率到 60fps (16ms)
+                timer = Timer(16) {
                     if (progressWidth < width) {
-                        val step = (width - progressWidth) / 40 + 1
+                        // 缓动算法：(目标 - 当前) * 0.1 产生一种顺滑的减速效果
+                        val diff = width - progressWidth
+                        val step = if (diff > 1) diff * 0.05 + 0.5 else 0.5
                         progressWidth += step
                         repaint()
                     }
                 }.apply { start() }
             } else {
                 timer?.stop()
-                progressWidth = 0
+                progressWidth = 0.0
                 repaint()
             }
         }
 
+    // [核心升级] 赛博朋克霓虹绘制
     override fun paintChildren(g: Graphics) {
-        super.paintChildren(g)
-        if (isBusy) {
+        super.paintChildren(g) // 绘制子组件
+
+        if (isBusy && progressWidth > 1) {
             val g2 = g as Graphics2D
-            g2.color = UIConstants.getMethodColor(selectedMethod)
-            g2.fillRect(0, height - 3, progressWidth, 3)
+            g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
+
+            val baseColor = UIConstants.getMethodColor(selectedMethod)
+            val barHeight = 3
+            val y = height - barHeight
+            val w = progressWidth.toInt()
+
+            // 1. 绘制光晕 (Glow) - 宽而淡
+            // 使用 alpha = 50 的颜色，宽度稍微大一点
+            g2.color = Color(baseColor.red, baseColor.green, baseColor.blue, 60)
+            g2.fillRect(0, y - 1, w, barHeight + 2)
+
+            // 2. 绘制核心光束 (Core) - 渐变拖尾
+            // 从左(透明) 到 右(纯色) 的渐变
+            val gradient = GradientPaint(
+                0f, 0f, Color(baseColor.red, baseColor.green, baseColor.blue, 0),
+                w.toFloat(), 0f, baseColor
+            )
+            g2.paint = gradient
+            g2.fillRect(0, y, w, barHeight)
+
+            // 3. 绘制头部高光 (Spark) - 就像光剑的顶端
+            g2.color = Color.WHITE
+            g2.fillRect(w - 2, y, 2, barHeight)
         }
     }
+
+    // [新增] 物理震动反馈
+    fun shake() {
+        val originalLocation = location
+        val shakeTimer = Timer(30, null)
+        var counter = 0
+
+        shakeTimer.addActionListener {
+            val amplitude = 5.0 // 震动幅度
+            val decay = 0.8 // 衰减系数
+
+            // 简单的阻尼正弦波
+            val offset = (sin(counter.toDouble()) * amplitude * Math.pow(decay, counter.toDouble())).toInt()
+
+            // 这里我们震动的是 AddressBar 内部的组件，或者你可以震动整个 Panel (如果 Layout 允许)
+            // 为了简单且安全，我们微调 URL Field 的 border 产生视觉错位，或者直接微调 JPanel 的绘制坐标
+            // 但 Swing 布局中改 location 可能会被 LayoutManager 强制复位。
+            // 最简单的视觉欺骗：改变 border padding
+
+            val pad = 2 + offset
+            border = BorderFactory.createCompoundBorder(
+                JBUI.Borders.empty(2, if(pad>0) pad else 2, 2, if(pad<0) -pad else 2), // 左右晃动
+                RoundedBorder(JBColor.border())
+            )
+
+            counter++
+            if (counter > 15) {
+                shakeTimer.stop()
+                // 复位
+                border = BorderFactory.createCompoundBorder(JBUI.Borders.empty(2, 0), RoundedBorder(JBColor.border()))
+            }
+        }
+        shakeTimer.start()
+    }
+
+    // --- 组件定义 (保持原逻辑，微调 UI) ---
 
     private val methodLabel = object : JLabel(selectedMethod) {
         private var isHover = false
@@ -79,7 +145,9 @@ class GeekAddressBar(
             if (isHover && !isBusy) {
                 val g2 = g as Graphics2D
                 g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
-                g2.color = JBColor.PanelBackground.darker()
+                // 鼠标悬停时的背景也改为淡色光晕
+                val c = UIConstants.getMethodColor(selectedMethod)
+                g2.color = Color(c.red, c.green, c.blue, 30) // 30 alpha
                 g2.fillRoundRect(2, 2, width - 4, height - 4, 6, 6)
             }
             super.paintComponent(g)
@@ -117,7 +185,6 @@ class GeekAddressBar(
             cursor = Cursor.getPredefinedCursor(Cursor.HAND_CURSOR)
             addMouseListener(object : MouseAdapter() {
                 override fun mouseClicked(e: MouseEvent) {
-                    // [修改] 核心交互逻辑
                     if (!isBusy) onSend() else onCancel()
                 }
                 override fun mouseEntered(e: MouseEvent) { isHover = true; repaint() }
@@ -128,10 +195,7 @@ class GeekAddressBar(
             val g2 = g as Graphics2D
             g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON)
 
-            // [修改] 颜色逻辑
-            // 加载中显示红色背景（或者你想保持原色也可以，这里用红色表示警示/停止）
-            // 这里为了美观，我们保持底色，只变文字，或者把背景变成淡红色
-            val baseColor = if (isBusy) UIConstants.getMethodColor(selectedMethod) else UIConstants.getMethodColor(selectedMethod)
+            val baseColor = if (isBusy) JBColor.RED else UIConstants.getMethodColor(selectedMethod) // Busy时变红(Stop)
             val color = if (isHover) baseColor.brighter() else baseColor
 
             g2.color = color
@@ -141,7 +205,6 @@ class GeekAddressBar(
             g2.color = Color.WHITE
             g2.font = Font("JetBrains Mono", Font.BOLD, 13)
 
-            // [修改] 文字逻辑
             val text = if (isBusy) "STOP" else "SEND"
 
             val fm = g2.fontMetrics
