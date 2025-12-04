@@ -6,10 +6,6 @@ plugins {
     id("org.jetbrains.intellij.platform") version "2.2.0"
 }
 
-// 1. 设置正确的 Group ID
-group = "com.phil.ultimate.rest.client"
-version = "1.0-SNAPSHOT"
-
 repositories {
     mavenCentral()
     // 添加 IntelliJ 插件仓库
