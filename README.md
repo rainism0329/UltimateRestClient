@@ -106,7 +106,7 @@ Contributions are welcome! If you have ideas for new features (like GraphQL supp
 
 **Phil Zhang**
 
-- 🌍 Website: [Home Page](https://phil-zhang.netlify.app/)
+- 🌍 Website: [Home Page](https://phil-the-guy.netlify.app/)
 - 📧 Email: bigphil.zhang@qq.com
 
 ---
