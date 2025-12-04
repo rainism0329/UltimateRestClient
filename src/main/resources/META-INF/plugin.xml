@@ -5,7 +5,7 @@
 
     <version>0.3.3</version>
 
-    <vendor url="https://phil-zhang.netlify.app/" email="bigphil.zhang@qq.com">Phil Zhang</vendor>
+    <vendor url="https://phil-the-guy.netlify.app/" email="bigphil.zhang@qq.com">Phil Zhang</vendor>
 
     <description><![CDATA[
     <h1>The "Swiss Army Knife" for Spring Boot API Testing</h1>
