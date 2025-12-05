@@ -22,6 +22,7 @@ import com.intellij.ui.treeStructure.Tree
 import com.intellij.util.concurrency.AppExecutorUtil
 import com.intellij.util.ui.JBUI
 import com.phil.rest.model.ApiDefinition
+import com.phil.rest.service.ApiCacheService // [New]
 import com.phil.rest.service.PostmanExportService
 import com.phil.rest.service.SpringScannerService
 import java.awt.BorderLayout
@@ -42,40 +43,32 @@ class ApiTreePanel(
 
     private val treeModel: DefaultTreeModel
     private val tree: Tree
-
-    // [新增] 搜索组件
     private val searchField = SearchTextField(true)
 
-    // [新增] 数据缓存 (Source of Truth)
+    // 数据源
     private var allApis: List<ApiDefinition> = emptyList()
 
     init {
         val rootNode = DefaultMutableTreeNode(project.name)
         treeModel = DefaultTreeModel(rootNode)
 
-        // [优化] 使用 CollectionTreeCellRenderer (假设你已经应用了最新的 Outline 风格渲染器)
-        // 这样 Live 和 Collections 列表风格就统一了
         tree = Tree(treeModel).apply {
             isRootVisible = true
             selectionModel.selectionMode = TreeSelectionModel.SINGLE_TREE_SELECTION
-            cellRenderer = CollectionTreeCellRenderer()
+            cellRenderer = CollectionTreeCellRenderer() // 复用渲染器
         }
 
         // --- 搜索逻辑 ---
-        searchField.textEditor.emptyText.text = "Search APIs (e.g. 'user', 'POST')..."
+        searchField.textEditor.emptyText.text = "Search APIs..."
         searchField.addDocumentListener(object : DocumentAdapter() {
-            override fun textChanged(e: DocumentEvent) {
-                filterTree(searchField.text)
-            }
+            override fun textChanged(e: DocumentEvent) { filterTree(searchField.text) }
         })
 
-        // --- 布局组装 ---
-        // 将搜索框放在顶部，带一点内边距
         val topPanel = JPanel(BorderLayout())
         topPanel.border = JBUI.Borders.empty(5)
         topPanel.add(searchField, BorderLayout.CENTER)
 
-        // 1. 鼠标监听
+        // ... (MouseListener & KeyListener 保持不变，省略以节省空间) ...
         tree.addMouseListener(object : MouseAdapter() {
             override fun mouseClicked(e: MouseEvent) {
                 val path = tree.getPathForLocation(e.x, e.y) ?: return
@@ -93,8 +86,6 @@ class ApiTreePanel(
                 }
             }
         })
-
-        // 2. 键盘监听
         tree.addKeyListener(object : KeyAdapter() {
             override fun keyPressed(e: KeyEvent) {
                 if (e.keyCode == KeyEvent.VK_ENTER) {
@@ -108,7 +99,7 @@ class ApiTreePanel(
             }
         })
 
-        // --- Actions ---
+        // ... (Actions 定义保持不变) ...
         val jumpAction = object : AnAction("Jump to Source", "Navigate to method declaration", AllIcons.Actions.EditSource) {
             override fun actionPerformed(e: AnActionEvent) {
                 val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
@@ -118,7 +109,7 @@ class ApiTreePanel(
         }
 
         val refreshAction = object : AnAction("Refresh", "Scan project for APIs", AllIcons.Actions.Refresh) {
-            override fun actionPerformed(e: AnActionEvent) { refreshApiTree() }
+            override fun actionPerformed(e: AnActionEvent) { refreshApiTree(true) }
         }
 
         val exportAllAction = object : AnAction("Export All", "Export all scanned APIs to Postman", AllIcons.Actions.MenuSaveall) {
@@ -131,8 +122,9 @@ class ApiTreePanel(
             }
         }
 
-        val exportSelectionAction = object : AnAction("Export This", "Export selected item to Postman", AllIcons.ToolbarDecorator.Export) {
+        val exportSelectionAction = object : AnAction("Export This", "Export selection", AllIcons.ToolbarDecorator.Export) {
             override fun actionPerformed(e: AnActionEvent) {
+                // ... (Logic same as before) ...
                 val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
                 val apisToExport = ArrayList<ApiDefinition>()
                 var exportName = "Exported_APIs"
@@ -142,24 +134,18 @@ class ApiTreePanel(
                     return
                 } else if (node.userObject is String) {
                     exportName = node.userObject as String
-                    for (i in 0 until node.childCount) {
-                        val child = node.getChildAt(i) as DefaultMutableTreeNode
-                        val api = child.userObject as? ApiDefinition
-                        if (api != null) apisToExport.add(api)
-                    }
+                    collectApisFromNode(node, apisToExport) // Extract helper
                 } else if (node.userObject is ApiDefinition) {
                     val api = node.userObject as ApiDefinition
                     apisToExport.add(api)
                     exportName = api.methodName
                 }
 
-                if (apisToExport.isNotEmpty()) {
-                    performExport(exportName, apisToExport)
-                }
+                if (apisToExport.isNotEmpty()) performExport(exportName, apisToExport)
             }
         }
 
-        // 3. 右键菜单
+        // Action Groups (Same as before)
         val rightClickActionGroup = DefaultActionGroup()
         rightClickActionGroup.add(jumpAction)
         rightClickActionGroup.addSeparator()
@@ -178,7 +164,6 @@ class ApiTreePanel(
             }
         })
 
-        // 4. 工具栏
         val toolbarActionGroup = DefaultActionGroup()
         toolbarActionGroup.add(refreshAction)
         toolbarActionGroup.add(jumpAction)
@@ -188,29 +173,40 @@ class ApiTreePanel(
         val toolbar = ActionManager.getInstance().createActionToolbar("ApiTreeToolbar", toolbarActionGroup, true)
         toolbar.targetComponent = this
 
-        // 组装最终界面
-        // Top: Toolbar + SearchField
-        // Center: Tree
         val northPanel = JPanel(BorderLayout())
         northPanel.add(toolbar.component, BorderLayout.NORTH)
         northPanel.add(topPanel, BorderLayout.CENTER)
 
-        setToolbar(northPanel) // 使用 setToolbar 设置顶部区域
+        setToolbar(northPanel)
         setContent(ScrollPaneFactory.createScrollPane(tree))
-
         DataManager.registerDataProvider(this, this)
 
-        // 初始化加载
-        refreshApiTree()
+        // [核心逻辑] 启动时先加载缓存，再后台扫描
+        loadFromCache()
+        refreshApiTree(false) // false = background sync
     }
 
-    // --- 核心逻辑 ---
+    // --- 缓存加载逻辑 ---
+    private fun loadFromCache() {
+        val cachedApis = ApiCacheService.getInstance(project).cachedApis
+        if (cachedApis.isNotEmpty()) {
+            allApis = cachedApis
+            filterTree(searchField.text)
+        } else {
+            val root = treeModel.root as DefaultMutableTreeNode
+            root.add(DefaultMutableTreeNode("Scanning..."))
+            treeModel.reload()
+        }
+    }
 
-    private fun refreshApiTree() {
-        val root = treeModel.root as DefaultMutableTreeNode
-        root.removeAllChildren()
-        root.userObject = "Scanning..."
-        treeModel.reload()
+    // --- 扫描逻辑 ---
+    private fun refreshApiTree(force: Boolean) {
+        if (force) {
+            val root = treeModel.root as DefaultMutableTreeNode
+            root.removeAllChildren()
+            root.add(DefaultMutableTreeNode("Scanning..."))
+            treeModel.reload()
+        }
 
         ReadAction.nonBlocking<List<ApiDefinition>> {
             val scanner = SpringScannerService(project)
@@ -218,25 +214,25 @@ class ApiTreePanel(
         }
             .inSmartMode(project)
             .finishOnUiThread(ModalityState.defaultModalityState()) { apis ->
-                // 1. 更新缓存
                 allApis = apis
 
-                // 2. 根据当前搜索框内容构建树
+                // 1. 更新 UI
                 filterTree(searchField.text)
 
-                // 3. 恢复 Root 名字
-                root.userObject = project.name
-                treeModel.reload()
+                // 2. 更新缓存 (静默)
+                ApiCacheService.getInstance(project).updateCache(apis)
+
+                // 3. 如果是静默更新，可以给个提示 (可选)
+                // if (!force) showBalloon("APIs Synced", MessageType.INFO)
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }
 
-    /**
-     * 根据关键词过滤并重建树
-     */
+    // --- 树构建逻辑 (支持 Module 分组) ---
     private fun filterTree(query: String) {
         val root = treeModel.root as DefaultMutableTreeNode
         root.removeAllChildren()
+        root.userObject = project.name // Ensure root name
 
         if (allApis.isEmpty()) {
             root.add(DefaultMutableTreeNode("No APIs found"))
@@ -246,7 +242,7 @@ class ApiTreePanel(
 
         val lowerQuery = query.lowercase().trim()
 
-        // 过滤逻辑：匹配 URL、Method、MethodName 或 ClassName
+        // 1. 过滤
         val filteredApis = if (lowerQuery.isEmpty()) {
             allApis
         } else {
@@ -254,16 +250,41 @@ class ApiTreePanel(
                 api.url.lowercase().contains(lowerQuery) ||
                         api.method.lowercase().contains(lowerQuery) ||
                         api.methodName.lowercase().contains(lowerQuery) ||
-                        api.className.lowercase().contains(lowerQuery)
+                        api.className.lowercase().contains(lowerQuery) ||
+                        (api.moduleName != null && api.moduleName.lowercase().contains(lowerQuery))
             }
         }
 
         if (filteredApis.isEmpty()) {
-            // 如果没搜到，这里什么都不加，树就是空的（除了 Root）
+            treeModel.reload()
+            return
+        }
+
+        // 2. 分组逻辑 (Module -> Controller)
+
+        // 检查是否有多个 Module (如果只有一个模块，就不显示模块层级，节省空间)
+        val uniqueModules = filteredApis.map { it.moduleName }.distinct()
+        val showModuleLevel = uniqueModules.size > 1
+
+        if (showModuleLevel) {
+            // 多模块模式: Root -> Module -> Controller -> API
+            val apisByModule = filteredApis.groupBy { it.moduleName }
+            apisByModule.forEach { (modName, modApis) ->
+                val moduleNode = DefaultMutableTreeNode(modName) // 需要 Icon 区分的话可以改 Renderer
+
+                val apisByController = modApis.groupBy { it.className }
+                apisByController.forEach { (controllerName, apiList) ->
+                    val simpleName = controllerName.substringAfterLast('.')
+                    val controllerNode = DefaultMutableTreeNode(simpleName)
+                    apiList.forEach { api -> controllerNode.add(DefaultMutableTreeNode(api)) }
+                    moduleNode.add(controllerNode)
+                }
+                root.add(moduleNode)
+            }
         } else {
-            // 分组逻辑
-            val groupedApis = filteredApis.groupBy { it.className }
-            groupedApis.forEach { (controllerName, apiList) ->
+            // 单模块模式: Root -> Controller -> API (保持原样)
+            val apisByController = filteredApis.groupBy { it.className }
+            apisByController.forEach { (controllerName, apiList) ->
                 val simpleName = controllerName.substringAfterLast('.')
                 val controllerNode = DefaultMutableTreeNode(simpleName)
                 apiList.forEach { api -> controllerNode.add(DefaultMutableTreeNode(api)) }
@@ -273,17 +294,23 @@ class ApiTreePanel(
 
         treeModel.reload()
 
-        // 如果正在搜索，自动展开所有节点以便查看结果
+        // 搜索时自动展开
         if (lowerQuery.isNotEmpty()) {
-            for (i in 0 until tree.rowCount) {
-                tree.expandRow(i)
-            }
+            for (i in 0 until tree.rowCount) tree.expandRow(i)
         }
     }
 
-    // ... (getData, findPsiMethod, navigateToSource, performExport 保持不变) ...
-    // 为了节省篇幅，这里复用您之前的代码，逻辑不需要变
+    // Helper to recursively collect APIs for export
+    private fun collectApisFromNode(node: DefaultMutableTreeNode, result: ArrayList<ApiDefinition>) {
+        if (node.userObject is ApiDefinition) {
+            result.add(node.userObject as ApiDefinition)
+        }
+        for (i in 0 until node.childCount) {
+            collectApisFromNode(node.getChildAt(i) as DefaultMutableTreeNode, result)
+        }
+    }
 
+    // ... (getData, findPsiMethod, navigateToSource 保持不变) ...
     override fun getData(dataId: String): Any? {
         if (PlatformCoreDataKeys.BGT_DATA_PROVIDER.`is`(dataId)) {
             val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode
@@ -314,6 +341,11 @@ class ApiTreePanel(
             .inSmartMode(project)
             .finishOnUiThread(ModalityState.defaultModalityState()) { method ->
                 if (method != null && method.canNavigate()) method.navigate(true)
+                else {
+                    // 如果找不到方法（代码改了），触发刷新
+                    Messages.showInfoMessage("Method definition changed. Refreshing...", "Sync")
+                    refreshApiTree(true)
+                }
             }
             .submit(AppExecutorUtil.getAppExecutorService())
     }

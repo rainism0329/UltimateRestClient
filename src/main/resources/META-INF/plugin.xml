@@ -3,7 +3,7 @@
 
     <name>RestPilot - Smart Spring Boot Client</name>
 
-    <version>0.6.7</version>
+    <version>0.7.7</version>
 
     <vendor url="https://phil-the-guy.netlify.app/" email="bigphil.zhang@qq.com">Phil Zhang</vendor>
 
@@ -65,7 +65,7 @@
     ]]></description>
 
     <change-notes><![CDATA[
-    <h3>0.6.7 Ultimate Update</h3>
+    <h3>0.7.7 Ultimate Update</h3>
     <ul>
         <li><b>🚀 New: Blast Mode.</b> Perform mini stress tests with concurrent requests.</li>
         <li><b>⚖️ New: Diff Detective.</b> Compare responses using IDE's native Diff viewer.</li>
@@ -90,6 +90,7 @@
 
         <projectService serviceImplementation="com.phil.rest.service.CollectionService"/>
         <projectService serviceImplementation="com.phil.rest.service.EnvService"/>
+        <projectService serviceImplementation="com.phil.rest.service.ApiCacheService"/>
 
         <codeInsight.lineMarkerProvider
                 language="JAVA"

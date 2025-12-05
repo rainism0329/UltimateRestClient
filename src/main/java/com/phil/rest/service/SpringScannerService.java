@@ -2,6 +2,8 @@ package com.phil.rest.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.SerializationFeature;
+import com.intellij.openapi.module.Module;
+import com.intellij.openapi.module.ModuleUtil;
 import com.intellij.openapi.project.Project;
 import com.intellij.psi.*;
 import com.intellij.psi.search.GlobalSearchScope;
@@ -26,6 +28,7 @@ public class SpringScannerService {
         List<ApiDefinition> apis = new ArrayList<>();
         GlobalSearchScope scope = GlobalSearchScope.projectScope(project);
 
+        // 查找所有 @RestController
         PsiClass restController = JavaPsiFacade.getInstance(project)
                 .findClass("org.springframework.web.bind.annotation.RestController", GlobalSearchScope.allScope(project));
 
@@ -36,13 +39,19 @@ public class SpringScannerService {
         for (PsiClass controllerClass : query) {
             String baseUrl = extractPathFromAnnotation(controllerClass, "org.springframework.web.bind.annotation.RequestMapping");
 
-            for (PsiMethod method : controllerClass.getMethods()) {
-                // [修复] 使用 getQualifiedName() 获取全限定名 (com.example.UserController)
-                // 否则 ApiTreePanel 无法通过 PSI 找到该类
-                String className = controllerClass.getQualifiedName();
-                if (className == null) className = controllerClass.getName(); // 兜底
+            // [新增] 获取当前 Controller 所属的 Module
+            Module module = ModuleUtil.findModuleForPsiElement(controllerClass);
+            String moduleName = (module != null) ? module.getName() : "Main";
 
-                ApiDefinition api = parseMethod(method, baseUrl, className, true);
+            for (PsiMethod method : controllerClass.getMethods()) {
+                String className = controllerClass.getQualifiedName();
+                if (className == null) className = controllerClass.getName();
+
+                // 传入 moduleName，scan 阶段默认 resolveBody = true (或者 false 取决于你需要多快，建议 false，点击时再解析 body)
+                // 这里为了缓存完整性，可以设为 true，但为了速度建议设为 true 并优化解析逻辑，或者设为 false
+                // 根据之前的 LineMarker 逻辑，这里是全量扫描，为了性能，Body 可以先给 "{}"，点击时再生成
+                // 但为了缓存能直接用，这里还是设为 true 比较好，只要 DTO 解析不递归太深
+                ApiDefinition api = parseMethod(method, baseUrl, className, moduleName, true);
                 if (api != null) {
                     apis.add(api);
                 }
@@ -52,24 +61,26 @@ public class SpringScannerService {
     }
 
     /**
-     * @param resolveBody 是否解析 RequestBody 的 JSON 结构。
+     * 解析单个方法 (用于 LineMarker 跳转)
      */
     public ApiDefinition parseSingleMethod(PsiMethod method, boolean resolveBody) {
         PsiClass controllerClass = method.getContainingClass();
         if (controllerClass == null) return null;
 
         String baseUrl = extractPathFromAnnotation(controllerClass, "org.springframework.web.bind.annotation.RequestMapping");
-
-        // [修复] 同样使用 getQualifiedName()
         String className = controllerClass.getQualifiedName();
         if (className == null) className = controllerClass.getName();
 
-        return parseMethod(method, baseUrl, className, resolveBody);
+        // [新增] 获取 Module
+        Module module = ModuleUtil.findModuleForPsiElement(controllerClass);
+        String moduleName = (module != null) ? module.getName() : "Main";
+
+        return parseMethod(method, baseUrl, className, moduleName, resolveBody);
     }
 
     // --- 核心解析逻辑 ---
 
-    private ApiDefinition parseMethod(PsiMethod method, String baseUrl, String className, boolean resolveBody) {
+    private ApiDefinition parseMethod(PsiMethod method, String baseUrl, String className, String moduleName, boolean resolveBody) {
         String[][] mappings = {
                 {"org.springframework.web.bind.annotation.GetMapping", "GET"},
                 {"org.springframework.web.bind.annotation.PostMapping", "POST"},
@@ -85,7 +96,8 @@ public class SpringScannerService {
                 String methodPath = extractValueFromAnnotation(annotation);
                 String fullUrl = combinePaths(baseUrl, methodPath);
 
-                ApiDefinition api = new ApiDefinition(mapping[1], fullUrl, className, method.getName());
+                // [修改] 构造函数传入 moduleName
+                ApiDefinition api = new ApiDefinition(mapping[1], fullUrl, className, method.getName(), moduleName);
                 parseParameters(method, api, resolveBody);
                 return api;
             }
@@ -130,7 +142,7 @@ public class SpringScannerService {
                 continue;
             }
 
-            // 4. Simple Types
+            // 4. Simple Types (默认作为 Query Param)
             if (isSimpleType(parameter.getType())) {
                 api.addParam(new RestParam(paramName, "", RestParam.ParamType.QUERY, paramType));
             }
@@ -149,7 +161,7 @@ public class SpringScannerService {
     }
 
     private Object parseTypeRecursively(PsiType type, int depth, Set<String> visited) {
-        if (depth > 5) return null;
+        if (depth > 5) return null; // 防止无限递归
         if (isSimpleType(type)) return getDefaultValueForSimpleType(type);
 
         if (type instanceof PsiArrayType) {
@@ -181,14 +193,16 @@ public class SpringScannerService {
         if (psiClass != null) {
             String qName = psiClass.getQualifiedName();
             if (qName != null && qName.startsWith("java.")) return null;
-            if (qName != null && visited.contains(qName)) return null;
+            if (qName != null && visited.contains(qName)) return null; // 循环引用检查
 
             Set<String> newVisited = new HashSet<>(visited);
             if (qName != null) newVisited.add(qName);
 
             Map<String, Object> map = new LinkedHashMap<>();
             for (PsiField field : psiClass.getAllFields()) {
-                if (field.hasModifierProperty(PsiModifier.STATIC) || field.hasModifierProperty(PsiModifier.FINAL) || field.hasModifierProperty(PsiModifier.TRANSIENT)) continue;
+                if (field.hasModifierProperty(PsiModifier.STATIC) ||
+                        field.hasModifierProperty(PsiModifier.FINAL) ||
+                        field.hasModifierProperty(PsiModifier.TRANSIENT)) continue;
                 map.put(field.getName(), parseTypeRecursively(field.getType(), depth + 1, newVisited));
             }
             return map;
@@ -205,6 +219,7 @@ public class SpringScannerService {
         for (PsiClass sup : psiClass.getSupers()) if (inheritanceCheck(sup, targetFqn)) return true;
         return false;
     }
+
     private Object getDefaultValueForSimpleType(PsiType type) {
         String typeName = type.getPresentableText();
         switch (typeName.toLowerCase()) {
@@ -217,18 +232,26 @@ public class SpringScannerService {
             default: return "";
         }
     }
+
     private boolean isSimpleTypeStr(String type) {
-        return type.equals("String") || type.equals("int") || type.equals("Integer") || type.equals("long") || type.equals("Long") || type.equals("double") || type.equals("Double") || type.equals("float") || type.equals("Float") || type.equals("boolean") || type.equals("Boolean") || type.equals("BigDecimal") || type.equals("Date") || type.equals("LocalDate") || type.equals("LocalDateTime");
+        return type.equals("String") || type.equals("int") || type.equals("Integer") ||
+                type.equals("long") || type.equals("Long") || type.equals("double") ||
+                type.equals("Double") || type.equals("float") || type.equals("Float") ||
+                type.equals("boolean") || type.equals("Boolean") || type.equals("BigDecimal") ||
+                type.equals("Date") || type.equals("LocalDate") || type.equals("LocalDateTime");
     }
+
     private String extractAttributeValue(PsiAnnotation annotation, String attribute) {
         PsiAnnotationMemberValue value = annotation.findAttributeValue(attribute);
         if (value != null && !"".equals(value.getText())) return value.getText().replace("\"", "");
         return "";
     }
+
     private String extractPathFromAnnotation(PsiModifierListOwner owner, String annotationFqn) {
         PsiAnnotation annotation = owner.getAnnotation(annotationFqn);
         return extractValueFromAnnotation(annotation);
     }
+
     private String extractValueFromAnnotation(PsiAnnotation annotation) {
         if (annotation == null) return "";
         PsiAnnotationMemberValue valueAttr = annotation.findAttributeValue("value");
@@ -237,6 +260,7 @@ public class SpringScannerService {
         if (pathAttr != null) return pathAttr.getText().replace("\"", "");
         return "";
     }
+
     private String combinePaths(String base, String sub) {
         if (base == null) base = "";
         if (sub == null) sub = "";
