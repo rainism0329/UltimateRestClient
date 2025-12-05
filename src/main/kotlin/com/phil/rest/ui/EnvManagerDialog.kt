@@ -9,6 +9,7 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.AnActionButton
+import com.intellij.ui.OnePixelSplitter // [关键修改] 引入 OnePixelSplitter
 import com.intellij.ui.ToolbarDecorator
 import com.intellij.ui.components.JBList
 import com.intellij.ui.table.JBTable
@@ -19,7 +20,7 @@ import java.awt.BorderLayout
 import javax.swing.DefaultListModel
 import javax.swing.JComponent
 import javax.swing.JPanel
-import javax.swing.JSplitPane
+// [关键修改] 移除 JSplitPane
 import javax.swing.event.TableModelEvent
 import javax.swing.table.DefaultTableModel
 
@@ -35,7 +36,6 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
     private val varTableModel = DefaultTableModel(arrayOf("Variable", "Value"), 0)
     private val varTable = JBTable(varTableModel)
 
-    // 标记是否正在加载数据，防止监听器循环触发
     private var isLoading = false
 
     init {
@@ -60,7 +60,7 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
             }
         }
 
-        // 默认选中上次使用的，或者第一个
+        // 默认选中
         if (!envListModel.isEmpty) {
             val lastSelected = service.selectedEnv
             if (lastSelected != null && service.envs.contains(lastSelected)) {
@@ -73,7 +73,6 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
 
     private fun loadVarsForSelectedEnv() {
         isLoading = true
-        // 停止之前的编辑
         if (varTable.isEditing) varTable.cellEditor.stopCellEditing()
 
         varTableModel.rowCount = 0
@@ -116,13 +115,11 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
                 if (selected != null && Messages.showYesNoDialog("Delete environment '${selected.name}'?", "Confirm Delete", Messages.getQuestionIcon()) == Messages.YES) {
                     service.removeEnv(selected)
                     envListModel.removeElement(selected)
-                    // 如果删除了当前选中的，重置选中状态
                     if (service.selectedEnv == selected) {
                         service.selectedEnv = null
                     }
                 }
             }
-            // *** 核心功能：导入 Postman Environment ***
             .addExtraAction(object : AnActionButton("Import Postman Env", AllIcons.Actions.Upload) {
                 override fun actionPerformed(e: AnActionEvent) {
                     importPostmanEnv()
@@ -133,7 +130,7 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
         val tableDecorator = ToolbarDecorator.createDecorator(varTable)
             .setAddAction {
                 varTableModel.addRow(arrayOf("", ""))
-                saveCurrentTableToEnv() // 添加空行也触发保存，以便实时更新
+                saveCurrentTableToEnv()
             }
             .setRemoveAction {
                 if (varTable.isEditing) varTable.cellEditor?.stopCellEditing()
@@ -143,9 +140,12 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
                 }
             }
 
-        // --- 组装 SplitPane ---
-        val splitter = JSplitPane(JSplitPane.HORIZONTAL_SPLIT, listDecorator.createPanel(), tableDecorator.createPanel())
-        splitter.dividerLocation = 200
+        // --- [核心优化] 使用 OnePixelSplitter 替代 JSplitPane ---
+        // false 表示水平分割 (左右布局)
+        // 0.3f 表示左侧占 30% 宽度
+        val splitter = OnePixelSplitter(false, 0.3f)
+        splitter.firstComponent = listDecorator.createPanel()
+        splitter.secondComponent = tableDecorator.createPanel()
         splitter.preferredSize = JBUI.size(700, 450)
 
         return splitter
@@ -169,7 +169,6 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
 
             if (valuesNode != null && valuesNode.isArray) {
                 for (node in valuesNode) {
-                    // Postman 导出格式中，enabled 默认为 true
                     val enabled = node.get("enabled")?.asBoolean(true) ?: true
                     if (enabled) {
                         val key = node.get("key")?.asText() ?: ""
@@ -182,7 +181,6 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
             }
             newEnv.variables = map
 
-            // 保存并选中
             service.addEnv(newEnv)
             envListModel.addElement(newEnv)
             envList.setSelectedValue(newEnv, true)

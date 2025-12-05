@@ -39,7 +39,7 @@ intellijPlatform {
             sinceBuild = "242"
 
             // untilBuild 留空或设为通配符，表示兼容未来版本
-            untilBuild = ""
+            untilBuild = "253.*"
         }
 
         changeNotes = """
