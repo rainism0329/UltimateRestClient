@@ -146,9 +146,30 @@ class RequestSender(private val project: Project) {
 
     private fun resolveVariables(text: String?): String {
         if (text.isNullOrEmpty()) return ""
-        val selectedEnv = EnvService.getInstance(project).selectedEnv ?: return text
+
+        // [核心升级] 变量合并逻辑
+        // 优先级：Selected Environment > Globals
+
+        val mergedVariables = HashMap<String, String>()
+        val service = EnvService.getInstance(project)
+
+        // 1. 先放入 Globals (垫底)
+        val globalEnv = service.globalEnv
+        if (globalEnv != null) {
+            mergedVariables.putAll(globalEnv.variables)
+        }
+
+        // 2. 再放入 Selected Env (覆盖)
+        val selectedEnv = service.selectedEnv
+        if (selectedEnv != null) {
+            mergedVariables.putAll(selectedEnv.variables)
+        }
+
+        if (mergedVariables.isEmpty()) return text
+
         var result = text
-        for ((key, value) in selectedEnv.variables) {
+        // 遍历合并后的 Map 进行替换
+        for ((key, value) in mergedVariables) {
             result = result?.replace("{{$key}}", value)
         }
         return result ?: ""

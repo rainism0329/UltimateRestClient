@@ -9,7 +9,9 @@ import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
 import com.intellij.ui.AnActionButton
-import com.intellij.ui.OnePixelSplitter // [关键修改] 引入 OnePixelSplitter
+import com.intellij.ui.ColoredListCellRenderer
+import com.intellij.ui.OnePixelSplitter
+import com.intellij.ui.SimpleTextAttributes
 import com.intellij.ui.ToolbarDecorator
 import com.intellij.ui.components.JBList
 import com.intellij.ui.table.JBTable
@@ -19,8 +21,8 @@ import com.phil.rest.service.EnvService
 import java.awt.BorderLayout
 import javax.swing.DefaultListModel
 import javax.swing.JComponent
+import javax.swing.JList
 import javax.swing.JPanel
-// [关键修改] 移除 JSplitPane
 import javax.swing.event.TableModelEvent
 import javax.swing.table.DefaultTableModel
 
@@ -28,11 +30,9 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
 
     private val service = EnvService.getInstance(project)
 
-    // 左侧：环境列表
     private val envListModel = DefaultListModel<RestEnv>()
     private val envList = JBList(envListModel)
 
-    // 右侧：变量表格 (Key, Value)
     private val varTableModel = DefaultTableModel(arrayOf("Variable", "Value"), 0)
     private val varTable = JBTable(varTableModel)
 
@@ -41,34 +41,44 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
     init {
         title = "Manage Environments"
 
-        // 1. 加载所有环境到列表
+        // 1. 先添加 Globals
+        envListModel.addElement(service.globalEnv)
+
+        // 2. 再添加普通环境
         service.envs.forEach { envListModel.addElement(it) }
 
-        init() // 构建 UI
+        // 自定义 Renderer
+        envList.cellRenderer = object : ColoredListCellRenderer<RestEnv>() {
+            override fun customizeCellRenderer(
+                list: JList<out RestEnv>, value: RestEnv?, index: Int, selected: Boolean, hasFocus: Boolean
+            ) {
+                if (value == service.globalEnv) {
+                    // [Fix] 使用更通用的 Web 图标作为地球仪
+                    icon = AllIcons.General.Web
+                    append(value.name, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
+                } else {
+                    icon = AllIcons.Nodes.Folder
+                    append(value?.name ?: "", SimpleTextAttributes.REGULAR_ATTRIBUTES)
+                }
+            }
+        }
 
-        // 2. 监听左侧列表选择，刷新右侧表格
+        init()
+
         envList.addListSelectionListener {
             if (!it.valueIsAdjusting) {
                 loadVarsForSelectedEnv()
             }
         }
 
-        // 3. 监听右侧表格修改，实时同步回对象
         varTableModel.addTableModelListener { e ->
             if (!isLoading && e.type == TableModelEvent.UPDATE) {
                 saveCurrentTableToEnv()
             }
         }
 
-        // 默认选中
-        if (!envListModel.isEmpty) {
-            val lastSelected = service.selectedEnv
-            if (lastSelected != null && service.envs.contains(lastSelected)) {
-                envList.setSelectedValue(lastSelected, true)
-            } else {
-                envList.selectedIndex = 0
-            }
-        }
+        // 默认选中 Globals
+        envList.selectedIndex = 0
     }
 
     private fun loadVarsForSelectedEnv() {
@@ -99,7 +109,6 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
     }
 
     override fun createCenterPanel(): JComponent {
-        // --- 左侧面板配置 (环境列表) ---
         val listDecorator = ToolbarDecorator.createDecorator(envList)
             .setAddAction {
                 val name = Messages.showInputDialog("Environment Name:", "New Environment", null)
@@ -112,6 +121,12 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
             }
             .setRemoveAction {
                 val selected = envList.selectedValue
+                // 禁止删除 Globals
+                if (selected == service.globalEnv) {
+                    Messages.showWarningDialog("Cannot delete Global environment.", "Restricted")
+                    return@setRemoveAction
+                }
+
                 if (selected != null && Messages.showYesNoDialog("Delete environment '${selected.name}'?", "Confirm Delete", Messages.getQuestionIcon()) == Messages.YES) {
                     service.removeEnv(selected)
                     envListModel.removeElement(selected)
@@ -120,13 +135,15 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
                     }
                 }
             }
+            .setRemoveActionUpdater { e ->
+                envList.selectedValue != service.globalEnv
+            }
             .addExtraAction(object : AnActionButton("Import Postman Env", AllIcons.Actions.Upload) {
                 override fun actionPerformed(e: AnActionEvent) {
                     importPostmanEnv()
                 }
             })
 
-        // --- 右侧面板配置 (变量表格) ---
         val tableDecorator = ToolbarDecorator.createDecorator(varTable)
             .setAddAction {
                 varTableModel.addRow(arrayOf("", ""))
@@ -140,9 +157,6 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
                 }
             }
 
-        // --- [核心优化] 使用 OnePixelSplitter 替代 JSplitPane ---
-        // false 表示水平分割 (左右布局)
-        // 0.3f 表示左侧占 30% 宽度
         val splitter = OnePixelSplitter(false, 0.3f)
         splitter.firstComponent = listDecorator.createPanel()
         splitter.secondComponent = tableDecorator.createPanel()
@@ -154,28 +168,22 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
     private fun importPostmanEnv() {
         val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("json")
         descriptor.title = "Select Postman Environment JSON"
-
         val file = FileChooser.chooseFile(descriptor, project, null) ?: return
 
         try {
             val mapper = ObjectMapper()
             val root = mapper.readTree(file.inputStream)
-
             val name = root.get("name")?.asText() ?: "Imported Env"
             val valuesNode = root.get("values")
 
             val newEnv = RestEnv(name)
             val map = HashMap<String, String>()
-
             if (valuesNode != null && valuesNode.isArray) {
                 for (node in valuesNode) {
-                    val enabled = node.get("enabled")?.asBoolean(true) ?: true
-                    if (enabled) {
-                        val key = node.get("key")?.asText() ?: ""
-                        val value = node.get("value")?.asText() ?: ""
-                        if (key.isNotBlank()) {
-                            map[key] = value
-                        }
+                    if (node.path("enabled").asBoolean(true)) {
+                        val key = node.path("key").asText()
+                        val value = node.path("value").asText()
+                        if (!key.isEmpty()) map[key] = value
                     }
                 }
             }
@@ -184,11 +192,9 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
             service.addEnv(newEnv)
             envListModel.addElement(newEnv)
             envList.setSelectedValue(newEnv, true)
-
-            Messages.showInfoMessage("Imported environment '$name' with ${map.size} variables.", "Success")
-
+            Messages.showInfoMessage("Imported environment '$name'.", "Success")
         } catch (ex: Exception) {
-            Messages.showErrorDialog("Failed to import Postman environment: ${ex.message}", "Import Error")
+            Messages.showErrorDialog("Import failed: ${ex.message}", "Error")
         }
     }
 }

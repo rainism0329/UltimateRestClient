@@ -16,7 +16,9 @@ public class EnvService implements PersistentStateComponent<EnvService.State> {
 
     public static class State {
         public List<RestEnv> envs = new ArrayList<>();
-        public String selectedEnvId; // 记住上次选的哪个环境
+        public String selectedEnvId;
+        // [新增] 专门存储 Global 变量，默认初始化
+        public RestEnv globalEnv = new RestEnv("Globals");
     }
 
     private State myState = new State();
@@ -29,7 +31,15 @@ public class EnvService implements PersistentStateComponent<EnvService.State> {
     public @Nullable State getState() { return myState; }
 
     @Override
-    public void loadState(@NotNull State state) { this.myState = state; }
+    public void loadState(@NotNull State state) {
+        this.myState = state;
+        // 防空处理
+        if (this.myState.globalEnv == null) {
+            this.myState.globalEnv = new RestEnv("Globals");
+        }
+        // 确保名字正确
+        this.myState.globalEnv.setName("Globals");
+    }
 
     // --- 业务方法 ---
 
@@ -48,5 +58,10 @@ public class EnvService implements PersistentStateComponent<EnvService.State> {
 
     public void setSelectedEnv(RestEnv env) {
         this.myState.selectedEnvId = (env == null) ? null : env.getId();
+    }
+
+    // [新增] 获取全局环境
+    public RestEnv getGlobalEnv() {
+        return myState.globalEnv;
     }
 }

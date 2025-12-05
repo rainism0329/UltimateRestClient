@@ -37,8 +37,6 @@ class CollectionsTreePanel(
 
     private val treeModel: DefaultTreeModel
     private val tree: Tree
-
-    // [新增] 搜索框
     private val searchField = SearchTextField(true)
 
     init {
@@ -49,12 +47,9 @@ class CollectionsTreePanel(
             cellRenderer = CollectionTreeCellRenderer()
         }
 
-        // --- 搜索逻辑 ---
         searchField.textEditor.emptyText.text = "Search collections..."
         searchField.addDocumentListener(object : DocumentAdapter() {
-            override fun textChanged(e: DocumentEvent) {
-                filterTree(searchField.text)
-            }
+            override fun textChanged(e: DocumentEvent) { filterTree(searchField.text) }
         })
 
         tree.addTreeSelectionListener {
@@ -65,8 +60,7 @@ class CollectionsTreePanel(
             }
         }
 
-        // --- Actions 定义 ---
-
+        // --- Actions ---
         val renameAction = object : AnAction("Rename") {
             override fun actionPerformed(e: AnActionEvent) {
                 val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
@@ -86,7 +80,6 @@ class CollectionsTreePanel(
                 if (Messages.showYesNoDialog(project, "Are you sure you want to delete '${userObject.name}'?", "Delete", Messages.getQuestionIcon()) == Messages.YES) {
                     val service = CollectionService.getInstance(project)
                     removeFromService(service.rootNodes, userObject)
-                    // 删除后刷新，保持当前搜索状态
                     if (searchField.text.isNullOrBlank()) reloadTree() else filterTree(searchField.text)
                 }
             }
@@ -112,7 +105,6 @@ class CollectionsTreePanel(
             }
         }
 
-        // 3. 右键菜单配置
         tree.addMouseListener(object : PopupHandler() {
             override fun invokePopup(comp: Component, x: Int, y: Int) {
                 val path = tree.getPathForLocation(x, y)
@@ -129,12 +121,9 @@ class CollectionsTreePanel(
             }
         })
 
-        // 4. 工具栏配置
-        val actionManager = ActionManager.getInstance()
-
+        // --- Toolbar ---
         val refreshAction = object : AnAction("Refresh", "Reload collections", AllIcons.Actions.Refresh) {
             override fun actionPerformed(e: AnActionEvent) {
-                // 刷新时清空搜索
                 searchField.text = ""
                 reloadTree()
             }
@@ -155,24 +144,20 @@ class CollectionsTreePanel(
             override fun actionPerformed(e: AnActionEvent) { onCreateNew() }
         }
 
-        val importAction = object : AnAction("Import Postman", "Import from JSON file", AllIcons.Actions.Upload) {
+        // [Fix 2] 升级后的 Import Action：支持 Collection 和 Dump
+        val importAction = object : AnAction("Import Postman", "Import Collection or Dump (Backup)", AllIcons.Actions.Upload) {
             override fun actionPerformed(e: AnActionEvent) {
                 val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("json")
-                descriptor.title = "Select Postman Collection JSON"
+                descriptor.title = "Select Postman JSON (Collection or Dump)"
                 val file = FileChooser.chooseFile(descriptor, project, null) ?: return
+
                 try {
                     val importer = PostmanImportService()
-                    val importedNodes = importer.importCollection(File(file.path))
-                    if (importedNodes.isEmpty()) {
-                        Messages.showWarningDialog("No items found in the collection.", "Import Failed")
-                        return
-                    }
-                    val service = CollectionService.getInstance(project)
-                    val importRoot = CollectionNode.createFolder(file.nameWithoutExtension)
-                    importRoot.children = importedNodes
-                    service.addRootNode(importRoot)
+                    // 调用新的 importDump 方法，它会自动识别是 Dump 还是单个 Collection
+                    val resultMsg = importer.importDump(File(file.path), project)
+
                     reloadTree()
-                    Messages.showInfoMessage("Successfully imported ${importedNodes.size} items.", "Import Success")
+                    Messages.showInfoMessage(resultMsg, "Import Success")
                 } catch (ex: Exception) {
                     Messages.showErrorDialog("Error parsing Postman file: ${ex.message}", "Import Error")
                 }
@@ -184,21 +169,17 @@ class CollectionsTreePanel(
         actionGroup.add(addFolderAction)
         actionGroup.add(addRequestAction)
         actionGroup.addSeparator()
-        actionGroup.add(importAction)
+        actionGroup.add(importAction) // Updated Action
         actionGroup.add(exportAllAction)
 
-        val toolbar = actionManager.createActionToolbar("CollectionToolbar", actionGroup, true)
+        val toolbar = ActionManager.getInstance().createActionToolbar("CollectionToolbar", actionGroup, true)
         toolbar.targetComponent = this
 
-        // --- 组装界面 ---
-        // 顶部面板：上面是工具栏，下面是搜索框
         val northPanel = JPanel(BorderLayout())
         northPanel.add(toolbar.component, BorderLayout.NORTH)
-
         val searchWrapper = JPanel(BorderLayout())
         searchWrapper.border = JBUI.Borders.empty(5)
         searchWrapper.add(searchField, BorderLayout.CENTER)
-
         northPanel.add(searchWrapper, BorderLayout.CENTER)
 
         setToolbar(northPanel)
@@ -206,8 +187,6 @@ class CollectionsTreePanel(
 
         reloadTree()
     }
-
-    // --- 过滤核心逻辑 ---
 
     private fun filterTree(query: String) {
         val root = treeModel.root as DefaultMutableTreeNode
@@ -219,63 +198,36 @@ class CollectionsTreePanel(
             service.rootNodes.forEach { root.add(buildTreeNode(it)) }
         } else {
             val lowerQuery = query.lowercase().trim()
-            // 递归构建过滤后的树
             service.rootNodes.forEach { node ->
                 val filteredNode = buildFilteredNode(node, lowerQuery)
-                if (filteredNode != null) {
-                    root.add(filteredNode)
-                }
+                if (filteredNode != null) root.add(filteredNode)
             }
         }
-
         treeModel.reload()
-
-        // 如果有搜索内容，默认展开所有匹配项，方便查看
         if (!query.isNullOrBlank()) {
-            for (i in 0 until tree.rowCount) {
-                tree.expandRow(i)
-            }
+            for (i in 0 until tree.rowCount) tree.expandRow(i)
         }
     }
 
-    // 递归过滤函数
     private fun buildFilteredNode(node: CollectionNode, query: String): DefaultMutableTreeNode? {
         val isSelfMatch = nodeMatches(node, query)
-
-        // 递归处理子节点
         val matchedChildren = ArrayList<DefaultMutableTreeNode>()
         if (node.isFolder) {
             for (child in node.children) {
                 val childNode = buildFilteredNode(child, query)
-                if (childNode != null) {
-                    matchedChildren.add(childNode)
-                }
+                if (childNode != null) matchedChildren.add(childNode)
             }
         }
-
-        // 逻辑：如果自己匹配，或者有子节点匹配，就保留这个节点
-        // 注意：如果自己匹配但子节点不匹配，是否保留所有子节点？
-        // 这里采用标准逻辑：只显示匹配的路径。
-        // 如果文件夹名字匹配，通常希望看到它下面的东西，但在严格过滤模式下，
-        // 我们只展示命中的叶子节点及其路径，或者命中的文件夹。
-
         if (isSelfMatch || matchedChildren.isNotEmpty()) {
             val treeNode = DefaultMutableTreeNode(node)
-            // 如果自己匹配了，是不是要加入所有孩子？
-            // 现在的逻辑是：即使自己匹配了，也只加入匹配的孩子。
-            // 这样能过滤得更精准。如果你想“搜到文件夹就显示全部”，需要改这里的逻辑。
             matchedChildren.forEach { treeNode.add(it) }
             return treeNode
         }
-
         return null
     }
 
     private fun nodeMatches(node: CollectionNode, query: String): Boolean {
-        // 匹配名字
         if (node.name.lowercase().contains(query)) return true
-
-        // 如果是请求，额外匹配 URL 和 Method
         if (!node.isFolder && node.request != null) {
             val req = node.request
             if (req.url != null && req.url.lowercase().contains(query)) return true
@@ -283,8 +235,6 @@ class CollectionsTreePanel(
         }
         return false
     }
-
-    // --- 原有逻辑 ---
 
     private fun exportToFile(nodes: List<CollectionNode>, defaultFileName: String) {
         val descriptor = FileSaverDescriptor("Export Collection", "Save as JSON file", "json")
@@ -312,7 +262,6 @@ class CollectionsTreePanel(
     }
 
     fun reloadTree() {
-        // 只有当搜索框为空时才全量加载，避免刷新打断搜索状态
         if (searchField.text.isNullOrBlank()) {
             val root = treeModel.root as DefaultMutableTreeNode
             root.removeAllChildren()
