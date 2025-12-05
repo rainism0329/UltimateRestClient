@@ -5,9 +5,12 @@ import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.AnActionEvent
 import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
+import com.intellij.openapi.fileChooser.FileChooserFactory // [新增]
+import com.intellij.openapi.fileChooser.FileSaverDescriptor // [新增]
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.DialogWrapper
 import com.intellij.openapi.ui.Messages
+import com.intellij.openapi.vfs.VirtualFile // [新增]
 import com.intellij.ui.AnActionButton
 import com.intellij.ui.ColoredListCellRenderer
 import com.intellij.ui.OnePixelSplitter
@@ -18,6 +21,7 @@ import com.intellij.ui.table.JBTable
 import com.intellij.util.ui.JBUI
 import com.phil.rest.model.RestEnv
 import com.phil.rest.service.EnvService
+import com.phil.rest.service.PostmanExportService // [新增]
 import java.awt.BorderLayout
 import javax.swing.DefaultListModel
 import javax.swing.JComponent
@@ -41,19 +45,14 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
     init {
         title = "Manage Environments"
 
-        // 1. 先添加 Globals
         envListModel.addElement(service.globalEnv)
-
-        // 2. 再添加普通环境
         service.envs.forEach { envListModel.addElement(it) }
 
-        // 自定义 Renderer
         envList.cellRenderer = object : ColoredListCellRenderer<RestEnv>() {
             override fun customizeCellRenderer(
                 list: JList<out RestEnv>, value: RestEnv?, index: Int, selected: Boolean, hasFocus: Boolean
             ) {
                 if (value == service.globalEnv) {
-                    // [Fix] 使用更通用的 Web 图标作为地球仪
                     icon = AllIcons.General.Web
                     append(value.name, SimpleTextAttributes.REGULAR_BOLD_ATTRIBUTES)
                 } else {
@@ -77,7 +76,6 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
             }
         }
 
-        // 默认选中 Globals
         envList.selectedIndex = 0
     }
 
@@ -121,7 +119,6 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
             }
             .setRemoveAction {
                 val selected = envList.selectedValue
-                // 禁止删除 Globals
                 if (selected == service.globalEnv) {
                     Messages.showWarningDialog("Cannot delete Global environment.", "Restricted")
                     return@setRemoveAction
@@ -138,7 +135,27 @@ class EnvManagerDialog(private val project: Project) : DialogWrapper(true) {
             .setRemoveActionUpdater { e ->
                 envList.selectedValue != service.globalEnv
             }
-            .addExtraAction(object : AnActionButton("Import Postman Env", AllIcons.Actions.Upload) {
+            // [新增] 导出按钮 (Export)
+            .addExtraAction(object : AnActionButton("Export Environment", AllIcons.ToolbarDecorator.Export) {
+                override fun actionPerformed(e: AnActionEvent) {
+                    val selected = envList.selectedValue ?: return
+                    val descriptor = FileSaverDescriptor("Export Environment", "Save as Postman JSON", "json")
+                    val dialog = FileChooserFactory.getInstance().createSaveFileDialog(descriptor, project)
+                    val wrapper = dialog.save(null as VirtualFile?, "${selected.name}.postman_environment.json")
+
+                    if (wrapper != null) {
+                        try {
+                            val exporter = PostmanExportService()
+                            exporter.exportEnvironment(selected, wrapper.file)
+                            Messages.showInfoMessage("Exported '${selected.name}' successfully.", "Export Success")
+                        } catch (ex: Exception) {
+                            Messages.showErrorDialog("Export failed: ${ex.message}", "Error")
+                        }
+                    }
+                }
+            })
+            // 导入按钮 (Import)
+            .addExtraAction(object : AnActionButton("Import Postman Env", AllIcons.ToolbarDecorator.Import) {
                 override fun actionPerformed(e: AnActionEvent) {
                     importPostmanEnv()
                 }

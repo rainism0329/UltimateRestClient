@@ -38,10 +38,8 @@ class RequestEditorPanel(
 
     private var activeCollectionNode: CollectionNode? = null
 
-    // [服务]
     private val requestSender = RequestSender(project)
 
-    // [UI组件]
     private val addressBar = GeekAddressBar(
         project,
         onSend = { sendRequest() },
@@ -77,7 +75,6 @@ class RequestEditorPanel(
 
         setContent(mainContent)
 
-        // 快捷键支持 (Ctrl+Enter 发送)
         val sendAction = object : DumbAwareAction() {
             override fun actionPerformed(e: AnActionEvent) { sendRequest() }
         }
@@ -86,9 +83,6 @@ class RequestEditorPanel(
 
     override fun dispose() {}
 
-    /**
-     * 发送单次请求
-     */
     private fun sendRequest() {
         if (addressBar.isBusy) return
 
@@ -107,12 +101,9 @@ class RequestEditorPanel(
                 addressBar.isBusy = false
                 responsePanel.updateResponse(response)
 
-                // [极客反馈] 呼吸灯闪烁
                 if (response.statusCode == 0 || response.statusCode >= 400) {
-                    // 错误：红光呼吸
                     addressBar.flash(JBColor.RED)
                 } else {
-                    // 成功：绿光呼吸 (给予正向反馈)
                     addressBar.flash(JBColor.GREEN)
                 }
 
@@ -123,9 +114,6 @@ class RequestEditorPanel(
         )
     }
 
-    /**
-     * [Blast Mode] 饱和式压测
-     */
     private fun performBlastTest() {
         val input = Messages.showInputDialog(project, "Enter number of requests (1-100):", "Blast Mode 🚀", Messages.getQuestionIcon(), "10", null)
         val count = input?.toIntOrNull() ?: return
@@ -134,12 +122,10 @@ class RequestEditorPanel(
             return
         }
 
-        // 收集一次数据
         val tempReq = SavedRequest()
         collectData(tempReq)
         val multipartParams = inputPanel.getMultipartParams()
 
-        // 预解析变量
         val env = EnvService.getInstance(project).selectedEnv
         fun resolve(s: String?) = s?.let { str ->
             var res = str
@@ -213,13 +199,10 @@ class RequestEditorPanel(
         })
     }
 
-    // --- Toolbar & UI ---
-
     private fun createTopToolbar(): ActionToolbar {
         val actionGroup = DefaultActionGroup()
         actionGroup.add(EnvironmentComboAction(project) {})
 
-        // 环境变量透视眼
         actionGroup.add(object : DumbAwareAction("View Variables", "Peek active environment variables", AllIcons.General.InspectionsEye) {
             override fun actionPerformed(e: AnActionEvent) {
                 val component = e.inputEvent?.component as? JComponent ?: return
@@ -250,8 +233,8 @@ class RequestEditorPanel(
         })
         actionGroup.addSeparator()
 
-        // cURL Actions
-        actionGroup.add(object : DumbAwareAction("Import cURL", "Paste cURL command to import", AllIcons.Actions.Upload) {
+        // [Fix] 使用 ToolbarDecorator.Import
+        actionGroup.add(object : DumbAwareAction("Import cURL", "Paste cURL command to import", AllIcons.ToolbarDecorator.Import) {
             override fun actionPerformed(e: AnActionEvent) {
                 val curlText = Messages.showMultilineInputDialog(project, "Paste your cURL command here:", "Import cURL", null, Messages.getQuestionIcon(), null)
                 if (!curlText.isNullOrBlank()) {
@@ -263,7 +246,6 @@ class RequestEditorPanel(
             override fun actionPerformed(e: AnActionEvent) { copyAsCurl() }
         })
 
-        // Code Gen
         actionGroup.add(object : DumbAwareAction("Generate Code", "Generate Java/Kotlin client code", AllIcons.Nodes.Class) {
             override fun actionPerformed(e: AnActionEvent) {
                 val component = e.inputEvent?.component as? JComponent ?: return
@@ -293,7 +275,6 @@ class RequestEditorPanel(
 
         actionGroup.addSeparator()
 
-        // Blast Mode
         actionGroup.add(object : DumbAwareAction("Blast Mode", "Run mini stress test", AllIcons.General.Error) {
             override fun actionPerformed(e: AnActionEvent) {
                 performBlastTest()
@@ -302,7 +283,6 @@ class RequestEditorPanel(
 
         actionGroup.addSeparator()
 
-        // Save Actions
         actionGroup.add(object : DumbAwareAction("Save", "Save current request", AllIcons.Actions.MenuSaveall) {
             override fun actionPerformed(e: AnActionEvent) {
                 if (activeCollectionNode != null) updateExistingRequest() else createNewRequestFlow()
@@ -317,8 +297,6 @@ class RequestEditorPanel(
         })
         return ActionManager.getInstance().createActionToolbar("RestClientTopToolbar", actionGroup, true)
     }
-
-    // --- 数据加载与渲染 ---
 
     fun createNewEmptyRequest() {
         activeCollectionNode = null
@@ -360,8 +338,6 @@ class RequestEditorPanel(
         inputPanel.loadRequestData(req.params, req.headers, req.bodyContent, req.authType, req.authContent, req.extractRules)
         responsePanel.clear()
     }
-
-    // --- 辅助方法 ---
 
     private fun importCurl(curlText: String): Boolean {
         val curlReq = CurlConverter.parseCurl(curlText) ?: return false

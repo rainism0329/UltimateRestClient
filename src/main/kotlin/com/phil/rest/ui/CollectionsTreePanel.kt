@@ -2,10 +2,10 @@ package com.phil.rest.ui
 
 import com.intellij.icons.AllIcons
 import com.intellij.openapi.actionSystem.*
-import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.fileChooser.FileChooserDescriptorFactory
-import com.intellij.openapi.fileChooser.FileSaverDescriptor
 import com.intellij.openapi.fileChooser.FileChooserFactory
+import com.intellij.openapi.fileChooser.FileSaverDescriptor
+import com.intellij.openapi.fileChooser.FileChooser
 import com.intellij.openapi.project.Project
 import com.intellij.openapi.ui.Messages
 import com.intellij.openapi.ui.SimpleToolWindowPanel
@@ -60,7 +60,6 @@ class CollectionsTreePanel(
             }
         }
 
-        // --- Actions ---
         val renameAction = object : AnAction("Rename") {
             override fun actionPerformed(e: AnActionEvent) {
                 val node = tree.lastSelectedPathComponent as? DefaultMutableTreeNode ?: return
@@ -94,7 +93,7 @@ class CollectionsTreePanel(
             }
         }
 
-        val exportAllAction = object : AnAction("Export All", "Export all collections", AllIcons.Actions.MenuSaveall) {
+        val exportAllAction = object : AnAction("Export All", "Export all collections", AllIcons.ToolbarDecorator.Export) {
             override fun actionPerformed(e: AnActionEvent) {
                 val service = CollectionService.getInstance(project)
                 if (service.rootNodes.isEmpty()) {
@@ -121,7 +120,6 @@ class CollectionsTreePanel(
             }
         })
 
-        // --- Toolbar ---
         val refreshAction = object : AnAction("Refresh", "Reload collections", AllIcons.Actions.Refresh) {
             override fun actionPerformed(e: AnActionEvent) {
                 searchField.text = ""
@@ -144,8 +142,8 @@ class CollectionsTreePanel(
             override fun actionPerformed(e: AnActionEvent) { onCreateNew() }
         }
 
-        // [Fix 2] 升级后的 Import Action：支持 Collection 和 Dump
-        val importAction = object : AnAction("Import Postman", "Import Collection or Dump (Backup)", AllIcons.Actions.Upload) {
+        // [Fix] 使用 ToolbarDecorator.Import 图标
+        val importAction = object : AnAction("Import Postman", "Import Collection or Dump (Backup)", AllIcons.ToolbarDecorator.Import) {
             override fun actionPerformed(e: AnActionEvent) {
                 val descriptor = FileChooserDescriptorFactory.createSingleFileDescriptor("json")
                 descriptor.title = "Select Postman JSON (Collection or Dump)"
@@ -153,9 +151,7 @@ class CollectionsTreePanel(
 
                 try {
                     val importer = PostmanImportService()
-                    // 调用新的 importDump 方法，它会自动识别是 Dump 还是单个 Collection
                     val resultMsg = importer.importDump(File(file.path), project)
-
                     reloadTree()
                     Messages.showInfoMessage(resultMsg, "Import Success")
                 } catch (ex: Exception) {
@@ -169,7 +165,7 @@ class CollectionsTreePanel(
         actionGroup.add(addFolderAction)
         actionGroup.add(addRequestAction)
         actionGroup.addSeparator()
-        actionGroup.add(importAction) // Updated Action
+        actionGroup.add(importAction)
         actionGroup.add(exportAllAction)
 
         val toolbar = ActionManager.getInstance().createActionToolbar("CollectionToolbar", actionGroup, true)

@@ -112,7 +112,7 @@ class ApiTreePanel(
             override fun actionPerformed(e: AnActionEvent) { refreshApiTree(true) }
         }
 
-        val exportAllAction = object : AnAction("Export All", "Export all scanned APIs to Postman", AllIcons.Actions.MenuSaveall) {
+        val exportAllAction = object : AnAction("Export All", "Export all scanned APIs to Postman", AllIcons.ToolbarDecorator.Export) {
             override fun actionPerformed(e: AnActionEvent) {
                 if (allApis.isEmpty()) {
                     Messages.showWarningDialog("No APIs to export.", "Export Failed")

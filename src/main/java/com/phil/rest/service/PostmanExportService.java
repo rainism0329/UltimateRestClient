@@ -6,12 +6,14 @@ import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.phil.rest.model.ApiDefinition;
 import com.phil.rest.model.CollectionNode;
+import com.phil.rest.model.RestEnv; // [新增]
 import com.phil.rest.model.RestParam;
 import com.phil.rest.model.SavedRequest;
 
 import java.io.File;
 import java.io.IOException;
 import java.util.List;
+import java.util.Map; // [新增]
 
 public class PostmanExportService {
 
@@ -37,21 +39,40 @@ public class PostmanExportService {
     }
 
     /**
-     * 导出 Live APIs (ApiDefinition)
-     * 将其扁平化导出，或者按 Controller 分组导出
+     * 导出 Live APIs
      */
     public void exportLiveApis(String groupName, List<ApiDefinition> apis, File file) throws IOException {
         ObjectNode root = mapper.createObjectNode();
 
         ObjectNode info = root.putObject("info");
-        info.put("name", groupName); // 使用项目名或 Controller 名
+        info.put("name", groupName);
         info.put("schema", "https://schema.getpostman.com/json/collection/v2.1.0/collection.json");
 
         ArrayNode itemArray = root.putArray("item");
-
-        // 简单起见，Live 模式我们直接扁平化生成 Request
         for (ApiDefinition api : apis) {
             itemArray.add(convertApiToPostmanItem(api));
+        }
+
+        mapper.writeValue(file, root);
+    }
+
+    /**
+     * [新增] 导出 Environment
+     */
+    public void exportEnvironment(RestEnv env, File file) throws IOException {
+        ObjectNode root = mapper.createObjectNode();
+
+        root.put("id", env.getId());
+        root.put("name", env.getName());
+        root.put("_postman_variable_scope", "environment");
+
+        ArrayNode values = root.putArray("values");
+        for (Map.Entry<String, String> entry : env.getVariables().entrySet()) {
+            ObjectNode val = values.addObject();
+            val.put("key", entry.getKey());
+            val.put("value", entry.getValue());
+            val.put("type", "text");
+            val.put("enabled", true);
         }
 
         mapper.writeValue(file, root);
@@ -68,7 +89,6 @@ public class PostmanExportService {
                 children.add(convertNode(child));
             }
         } else {
-            // 是请求
             item.set("request", buildRequestNode(node.getRequest()));
         }
         return item;
@@ -77,14 +97,12 @@ public class PostmanExportService {
     // --- 转换逻辑: ApiDefinition -> Postman Item ---
     private ObjectNode convertApiToPostmanItem(ApiDefinition api) {
         ObjectNode item = mapper.createObjectNode();
-        item.put("name", api.getMethodName()); // Item 名字
+        item.put("name", api.getMethodName());
 
-        // 构造临时的 SavedRequest 方便复用逻辑
         SavedRequest tempReq = new SavedRequest();
         tempReq.setMethod(api.getMethod());
-        tempReq.setUrl(api.getUrl()); // 注意：这里通常是相对路径，导出时可能需要补全 host
+        tempReq.setUrl(api.getUrl());
 
-        // 转换参数
         for (RestParam p : api.getParams()) {
             if (p.getType() == RestParam.ParamType.QUERY) {
                 tempReq.getParams().add(p);
@@ -104,7 +122,6 @@ public class PostmanExportService {
         ObjectNode request = mapper.createObjectNode();
         request.put("method", req.getMethod().toUpperCase());
 
-        // 1. Header
         ArrayNode headerArray = request.putArray("header");
         for (RestParam h : req.getHeaders()) {
             ObjectNode hNode = headerArray.addObject();
@@ -113,7 +130,6 @@ public class PostmanExportService {
             hNode.put("type", "text");
         }
 
-        // 2. Body
         ObjectNode body = request.putObject("body");
         if (req.getBodyContent() != null && !req.getBodyContent().isBlank()) {
             body.put("mode", "raw");
@@ -124,13 +140,8 @@ public class PostmanExportService {
             body.put("mode", "none");
         }
 
-        // 3. URL
         ObjectNode url = request.putObject("url");
-        // 简单处理：直接把完整 URL 塞给 raw
-        // Postman 标准格式其实需要拆分 host, path, query
         url.put("raw", req.getUrl());
-        // 如果需要更精细，可以解析 req.getUrl() 并拆分 host 和 path
-        // 也可以把 Query Param 塞进去
         ArrayNode queryArray = url.putArray("query");
         for (RestParam p : req.getParams()) {
             ObjectNode q = queryArray.addObject();
